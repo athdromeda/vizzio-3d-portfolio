@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { PALETTE } from '../styles/palette';
 import { ColliderIndex, FOG_DENSITY, KIND, SUN_DAY, SUN_DUSK, bakeGround, bakeHeights, bakeShadow, getBuildings, getShips, getTrees, toCollider, type Collider, type HeightExtra } from './layout';
 import { SHARED, makeBuildingMaterial, makeGroundMaterial, makeSkyMaterial, makeTreeMaterial } from './shaders';
-import { buildStreetLife } from './street';
+import { buildStreetLife, type Actor, type Obstacle } from './street';
 
 const WARM = 0xffb070;
 
@@ -44,7 +44,13 @@ export interface City {
   surfaceBelow?(x: number, y: number, z: number): number | null;
   /** Real tiles only: the data attribution that must stay on screen. */
   credits?(): string;
-  update(time: number, camera: THREE.Vector3): void;
+  /**
+   * Once per rendered view. `actor` is whoever the visitor steers on the ground (people step aside, vehicles
+   * become obstacles); `main` is false for a side view such as a camera still.
+   */
+  update(time: number, camera: THREE.Vector3, actor?: Actor | null, main?: boolean): void;
+  /** Vehicles close to the actor: boxes that cannot be walked or ridden through. Generated city only. */
+  obstacles?: Obstacle[];
   dispose(): void;
 }
 
@@ -470,7 +476,9 @@ export function buildCity(): City {
   sky.frustumCulled = false;
   group.add(sky);
 
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(70000, 70000).rotateX(-Math.PI / 2), makeGroundMaterial());
+  // cut into 350 m cells: across one 70 km triangle the depth is too coarse for a camera at street level,
+  // and the ground comes out in front of whatever stands on it
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(70000, 70000, 200, 200).rotateX(-Math.PI / 2), makeGroundMaterial());
   ground.position.set(1500, 0, -400);
   group.add(ground);
 
@@ -584,7 +592,7 @@ export function buildCity(): City {
   shipping(group, afloat);
   afloat.forEach((c) => colliders.add(c));
 
-  const street = buildStreetLife();
+  const street = buildStreetLife(colliders);
   group.add(street.group);
 
   // baked maps: heights for shadows, ground cover for the streets and yards
@@ -667,6 +675,7 @@ export function buildCity(): City {
   const city: City = {
     group,
     colliders,
+    obstacles: street.obstacles,
     envScene,
     fog,
     lightVersion: 0,
@@ -679,7 +688,7 @@ export function buildCity(): City {
         city.lightVersion++;
       }
     },
-    update(t, camera) {
+    update(t, camera, actor = null, main = true) {
       const dt = Math.min(Math.max(t - last, 0), 0.25); // a generous cap: the light change should take seconds, not frames
       last = t;
       SHARED.uTime.value = t;
@@ -689,7 +698,7 @@ export function buildCity(): City {
         if (day === target) city.lightVersion++;
       }
       sky.position.copy(camera);
-      street.update(camera);
+      street.update(camera, t, actor, main);
       turning.rotation.z = t * 0.03;
       for (const g of groves) {
         const close = Math.hypot(g.x - camera.x, g.z - camera.z) < 1700 && camera.y < 1400;

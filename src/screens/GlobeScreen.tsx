@@ -175,9 +175,9 @@ export function GlobeScreen({ initialFocusId = null, onEnter }: Props) {
   return (
       <main className={`main${panel ? ' has-panel' : ''}`}>
         <section className="rail" aria-label="Countries">
-          <p className="eyebrow">Select a country</p>
-          <h1>Pick a country. Fly its cities.</h1>
-          <p className="lede">See the work from orbit down to a single stadium.</p>
+          <p className="eyebrow">Earth, modelled in 3D</p>
+          <h1>A digital twin of planet Earth.</h1>
+          <p className="lede">Every city, modelled in high-resolution 3D and kept alive with real-time data. Choose a country and step inside.</p>
 
           <ul className="index">
             {COUNTRIES.map((c) => (

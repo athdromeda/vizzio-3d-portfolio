@@ -2,10 +2,12 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { loadAvatar } from '../avatars/loadAvatar';
+import { SEAT, buildBike, buildParked, spotsNear, type Spot } from '../city/bike';
 import { buildCity, type City } from '../city/buildCity';
+import { Ground } from '../city/ground';
 import { GROUND_Y, REAL, place } from '../city/geo';
 import { FLIGHT_KEYS, Flight } from '../city/flight';
-import { START, getBuildings } from '../city/layout';
+import { START, getBuildings, landSdf, type Collider } from '../city/layout';
 import { drawMinimap, makeMinimapBase } from '../city/minimap';
 import { buildAssetScene, buildOverlays, cameraWall } from '../city/overlays';
 import { Console } from '../console/Console';
@@ -52,7 +54,33 @@ interface Hud {
   markers: (HTMLElement | null)[];
   dists: (HTMLElement | null)[];
   ticks: (HTMLElement | null)[];
+  /** How many prompts are stacked above the bottom strip: landmark markers along the bottom keep clear of them. */
+  rows: number;
 }
+
+export type TravelMode = 'fly' | 'walk' | 'ride';
+/** What the HUD needs to know about how the visitor is getting around. */
+export interface TravelState {
+  mode: TravelMode;
+  /** On foot, within reach of a motorbike. */
+  nearBike: boolean;
+  /** Flying low over open ground. */
+  canLand: boolean;
+}
+/** The scene's side of the ground controls: the screen calls these from its key handler. */
+export interface Travel {
+  look(dx: number, dy: number): void;
+  /** Land, or take off again. */
+  toggleGround(): void;
+  /** Get on the nearest motorbike, or off the one being ridden. */
+  toggleBike(): void;
+  /** Sound the horn. False when not on a bike. */
+  honk(): boolean;
+}
+/** Hip height of the pilot model above its soles, metres. */
+const HIP = 1.03;
+/** Parked bikes are drawn, and landing is offered, below this height. */
+const LOW = 220;
 
 interface SceneProps {
   avatar: Avatar;
@@ -73,6 +101,8 @@ interface SceneProps {
   jobs: React.RefObject<SnapJob[]>;
   visited: React.RefObject<Set<string>>;
   flightRef: React.RefObject<Flight | null>;
+  travelRef: React.RefObject<Travel | null>;
+  onTravel: (s: TravelState) => void;
   onReady: () => void;
   /** Called when the landmark in range changes. */
   onNear: (id: string | null) => void;
@@ -80,7 +110,7 @@ interface SceneProps {
   onLight: () => void;
 }
 
-function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, onReady, onNear, onLight }: SceneProps) {
+function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
@@ -97,6 +127,34 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     return f;
   }, [avatar, city]);
   useEffect(() => city.attach?.(camera, gl), [city, camera, gl]);
+  // the pilot can leave the air: on foot and on the motorbikes parked along the streets (generated city only)
+  const canGround = avatar.ground === true && !REAL;
+  const ground = useMemo(() => {
+    const g = new Ground(city.colliders, flight.keys, flight.centre, flight.radius);
+    if (city.obstacles) g.obstacles = city.obstacles; // the traffic around the pilot, kept up to date by the city
+    return g;
+  }, [city, flight]);
+  /** The pilot as the street sees him: people step out of his way. */
+  const actor = useMemo(() => ({ x: 0, y: 0, z: 0, vx: 0, vz: 0, urge: 0 }), []);
+  const bikes = useMemo(() => (canGround ? { parked: buildParked(), own: buildBike(), props: new THREE.Group() } : null), [canGround]);
+  const travel = useRef({
+    mode: 'fly' as TravelMode,
+    now: 0,
+    block: '',
+    spots: [] as Spot[],
+    /** The parked bike that was taken, and where the ridden bike was last left. */
+    taken: null as string | null,
+    left: null as { x: number; z: number; yaw: number } | null,
+    near: null as { x: number; z: number; yaw: number; spot: Spot | null } | null,
+    canLand: false,
+    told: '',
+    stale: true,
+    hit: [] as Collider[],
+  });
+  useEffect(() => {
+    if (!bikes) return;
+    bikes.props.add(bikes.parked.group);
+  }, [bikes]);
   // yaw -> bank -> lean, so a roll is always around the direction of travel
   const rig = useMemo(() => {
     const yaw = new THREE.Group(), bank = new THREE.Group(), lean = new THREE.Group();
@@ -173,6 +231,90 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     };
   }, [flight, flightRef]);
 
+  useEffect(() => {
+    const tr = travel.current;
+    /** Stand the ridden bike where it was left, on its side stand. */
+    const parkOwn = () => {
+      if (!bikes || !tr.left) return;
+      bikes.own.group.position.set(tr.left.x, 0, tr.left.z);
+      bikes.own.group.rotation.set(0, Math.PI - tr.left.yaw, -0.17, 'YXZ');
+      bikes.own.steer.rotation.y = 0.4;
+      bikes.props.add(bikes.own.group);
+    };
+    travelRef.current = {
+      look: (dx, dy) => (tr.mode === 'fly' ? flight.look(dx, dy) : ground.look(dx, dy)),
+      toggleGround() {
+        if (!canGround) return;
+        if (tr.mode === 'fly') {
+          if (!tr.canLand) return;
+          ground.arrive(flight.pos, flight.aimYaw);
+          tr.mode = 'walk';
+        } else {
+          if (tr.mode === 'ride') {
+            tr.left = { x: ground.pos.x, z: ground.pos.z, yaw: ground.yaw };
+            parkOwn();
+          }
+          flight.pos.copy(ground.pos);
+          flight.pos.y += HIP;
+          flight.vel.set(0, 7, 0);
+          flight.yaw = flight.aimYaw = ground.aimYaw;
+          flight.pitch = 0;
+          flight.aimPitch = 0.12;
+          tr.mode = 'fly';
+        }
+        tr.stale = true;
+      },
+      toggleBike() {
+        if (!bikes) return;
+        if (tr.mode === 'walk' && tr.near && !ground.airborne) {
+          if (tr.near.spot) {
+            tr.taken = tr.near.spot.key;
+            bikes.own.paint.color.setHex(tr.near.spot.colour);
+          }
+          tr.left = null;
+          ground.mount(tr.near.x, tr.near.z, tr.near.yaw);
+          bikes.own.group.position.set(0, 0, 0);
+          bikes.own.group.rotation.set(0, 0, 0);
+          rig.bank.add(bikes.own.group);
+          tr.mode = 'ride';
+        } else if (tr.mode === 'ride' && !ground.airborne) {
+          tr.left = ground.dismount();
+          parkOwn();
+          tr.mode = 'walk';
+        }
+        tr.stale = true;
+      },
+      honk() {
+        if (tr.mode !== 'ride') return false;
+        ground.honkAt = tr.now;
+        return true;
+      },
+    };
+    return () => {
+      travelRef.current = null;
+    };
+  }, [flight, ground, bikes, canGround, rig, travelRef]);
+
+  // test builds only (VITE_TEST=1): the software renderer runs far below real time, so the test script moves the
+  // simulation itself. Compiled out of every other build.
+  useEffect(() => {
+    if (!import.meta.env.VITE_TEST) return;
+    (window as unknown as Record<string, unknown>).__test = {
+      flight,
+      ground,
+      travel: travel.current,
+      scene,
+      city,
+      rig,
+      camera,
+      frames: () => frames.current,
+      arrive: () => (intro.current = 1),
+      sim(seconds: number, step = 1 / 60) {
+        for (let s = 0; s < seconds; s += step) (travel.current.mode === 'fly' ? flight : ground).update(step, true);
+      },
+    };
+  }, [flight, ground, city, scene, camera, rig]);
+
   // reflections on the flyer come from this scene's own sky, baked again whenever the light has changed
   const env = useRef<{ pmrem: THREE.PMREMGenerator; target: THREE.WebGLRenderTarget | null; version: number } | null>(null);
   useEffect(() => {
@@ -207,6 +349,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       const obj = model.current;
       if (!obj) return;
       rig.lean.remove(obj);
+      rig.lean.position.set(0, 0, 0);
       (obj.userData.setPose as ((preview: boolean) => void) | undefined)?.(true);
       obj.userData.throttle = 0.6;
     };
@@ -230,29 +373,80 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     const want = cam.current ?? touring;
     rig.yaw.visible = !touring;
 
-    flight.update(dt, live.current === true && intro.current > 0.7 && !want);
-
-    const pace = clamp(flight.speed / (avatar.flight.topSpeed / 3.6 / 1.3), 0, 1);
-    rig.yaw.position.copy(flight.pos);
-    rig.yaw.position.y += Math.sin(t * 1.6) * 0.18 * (1 - pace);
-    rig.yaw.rotation.y = Math.PI - flight.yaw;
-    rig.bank.rotation.z = flight.bank;
-    rig.lean.rotation.x = avatar.cruiseLean * pace - flight.pitch * 0.85;
+    const tr = travel.current;
+    tr.now = t;
+    const controls = live.current === true && intro.current > 0.7 && !want;
+    if (tr.mode === 'fly') flight.update(dt, controls);
+    else ground.update(dt, controls);
+    /** Whoever is carrying the visitor right now: position, view direction and speed for the camera and the HUD. */
+    const who = tr.mode === 'fly' ? flight : ground;
     const obj = model.current;
-    if (obj) {
-      obj.userData.throttle = 0.3 + flight.throttle;
-      (obj.userData.tick as ((s: number) => void) | undefined)?.(t);
+    const stance = obj?.userData.setStance as ((s: { mode: 'fly' | 'walk' | 'air' | 'ride'; phase?: number; amount?: number }, flames: boolean) => void) | undefined;
+
+    if (tr.mode === 'fly') {
+      const pace = clamp(flight.speed / (avatar.flight.topSpeed / 3.6 / 1.3), 0, 1);
+      rig.yaw.position.copy(flight.pos);
+      rig.yaw.position.y += Math.sin(t * 1.6) * 0.18 * (1 - pace);
+      rig.yaw.rotation.y = Math.PI - flight.yaw;
+      rig.bank.rotation.z = flight.bank;
+      rig.lean.position.set(0, 0, 0);
+      rig.lean.rotation.x = avatar.cruiseLean * pace - flight.pitch * 0.85;
+      stance?.({ mode: 'fly' }, true);
+      if (obj) obj.userData.throttle = 0.3 + flight.throttle;
+    } else if (tr.mode === 'walk') {
+      rig.yaw.position.copy(ground.pos);
+      rig.yaw.rotation.y = Math.PI - ground.yaw;
+      rig.bank.rotation.z = 0;
+      rig.lean.position.set(0, HIP - Math.abs(Math.cos(ground.stride)) * 0.05 * ground.effort, 0);
+      rig.lean.rotation.x = ground.airborne ? 0.12 : 0.2 * ground.effort;
+      // the jets burn on the way down from flight, and are off on the street
+      stance?.(ground.airborne ? { mode: 'air' } : { mode: 'walk', phase: ground.stride, amount: Math.min(1, ground.effort * 1.6) }, ground.descending);
+      if (obj) obj.userData.throttle = 0.5;
+    } else {
+      rig.yaw.position.copy(ground.pos);
+      rig.yaw.rotation.y = Math.PI - ground.yaw;
+      rig.bank.rotation.z = ground.lean;
+      rig.lean.position.set(0, SEAT.y, SEAT.z);
+      rig.lean.rotation.x = SEAT.lean + 0.1 * ground.boost;
+      stance?.({ mode: 'ride' }, false);
+      if (bikes) {
+        bikes.own.steer.rotation.y = -ground.steer * 0.32;
+        for (const w of bikes.own.wheels) w.rotation.x = ground.spin;
+      }
+    }
+    if (obj) (obj.userData.tick as ((s: number) => void) | undefined)?.(t);
+    if (bikes) {
+      // headlight: on while riding, flashed by the horn (a cue for anyone with the sound off)
+      const flash = t - ground.honkAt < 0.5 ? 1 : 0;
+      bikes.own.head.color.setRGB(1, 0.95, 0.86).multiplyScalar(tr.mode === 'ride' ? 1.5 + 5 * flash : 0.45);
     }
 
     // chase camera: sits behind the aim direction, so it answers the mouse at once
-    Flight.forward(flight.aimYaw, flight.aimPitch, v.aim);
-    v.chase.copy(flight.pos).addScaledVector(v.aim, -avatar.chase.back * (1 + 0.35 * flight.boost));
-    v.chase.y = Math.max(3, v.chase.y + avatar.chase.up);
-    v.look.copy(flight.pos).addScaledVector(v.aim, 40);
-    v.look.y += 1;
+    Flight.forward(who.aimYaw, who.aimPitch, v.aim);
+    if (tr.mode === 'fly') {
+      v.chase.copy(flight.pos).addScaledVector(v.aim, -avatar.chase.back * (1 + 0.35 * flight.boost));
+      v.chase.y = Math.max(3, v.chase.y + avatar.chase.up);
+      v.look.copy(flight.pos).addScaledVector(v.aim, 40);
+      v.look.y += 1;
+    } else {
+      // on the ground the camera circles the rider's head and keeps out of the buildings
+      const riding = tr.mode === 'ride';
+      v.look.copy(ground.pos);
+      v.look.y += riding ? 1.35 : 1.6;
+      v.chase.copy(v.look).addScaledVector(v.aim, -(riding ? 6.2 : 5) * (1 + 0.3 * ground.boost));
+      v.chase.y += 0.5;
+      for (let k = 0; k < 5; k++) {
+        const c = v.chase;
+        const inside = city.colliders.near(c.x, c.z, tr.hit).some((b) => c.x > b.minX - 0.5 && c.x < b.maxX + 0.5 && c.z > b.minZ - 0.5 && c.z < b.maxZ + 0.5 && c.y > b.y0 && c.y < b.y1);
+        if (!inside) break;
+        c.lerp(v.look, 0.4);
+      }
+      v.chase.y = Math.max(0.45, v.chase.y);
+      v.look.addScaledVector(v.aim, 14);
+    }
     if (e < 1) {
       v.chaseCam.lerpVectors(INTRO_CAM, v.chase, e);
-      v.at.lerpVectors(flight.pos, v.look, e);
+      v.at.lerpVectors(who.pos, v.look, e);
     } else {
       v.chaseCam.lerp(v.chase, 1 - Math.exp(-dt * 14));
       v.at.copy(v.look);
@@ -333,7 +527,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     }
     camera.lookAt(v.at);
     const held = clamp(o.blend, 0, 1);
-    const fov = (FOV + 16 * flight.boost) * (1 - held) + o.fov * held;
+    const fov = (FOV + 16 * who.boost) * (1 - held) + o.fov * held;
     if (Math.abs(camera.fov - fov) > 0.05) {
       camera.fov = fov;
       camera.updateProjectionMatrix();
@@ -358,7 +552,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       const alpha = gl.getClearAlpha();
       gl.getClearColor(snap.clear);
       if (job.asset) gl.setClearColor(0x000000, 0);
-      else city.update(t, snap.camera.position); // the sky dome follows whichever camera is rendering
+      else city.update(t, snap.camera.position, null, false); // the sky dome follows whichever camera is rendering
       const so = job.overlay ?? NO_OVERLAY;
       overlays.setRoutes(so.routes, so.route);
       overlays.setFence(so.fence);
@@ -391,7 +585,15 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       ctx.putImageData(img, 0, 0);
       job.done(canvas.toDataURL(job.asset ? 'image/png' : 'image/jpeg', 0.82));
     }
-    city.update(t, camera.position);
+    if (tr.mode !== 'fly') {
+      actor.x = ground.pos.x;
+      actor.y = ground.pos.y;
+      actor.z = ground.pos.z;
+      actor.vx = ground.vel.x;
+      actor.vz = ground.vel.z;
+      actor.urge = t - ground.honkAt < 1.2 ? 1 : 0;
+    }
+    city.update(t, camera.position, tr.mode === 'fly' ? null : actor);
 
     // console tags and map pins: pinned to their place in the city. One that would sit under a side column
     // or off screen is hidden; ones that would overlap are raised on a longer leader line.
@@ -445,14 +647,47 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     const h = hud.current;
     const s = shown.current;
     if (!h) return;
-    const speed = Math.round(flight.speed * 3.6);
-    const alt = Math.round(flight.pos.y);
-    const hdg = Math.round(flight.heading) % 360;
+    const speed = Math.round(Math.abs(who.speed) * 3.6);
+    const alt = Math.round(who.pos.y);
+    const hdg = Math.round(who.heading) % 360;
     if (h.speed && speed !== s.speed) h.speed.textContent = String((s.speed = speed));
     if (h.alt && alt !== s.alt) h.alt.textContent = String((s.alt = alt));
     if (h.hdg && hdg !== s.hdg) h.hdg.textContent = String((s.hdg = hdg)).padStart(3, '0');
-    if (h.tape) h.tape.style.transform = `translateX(${(-(flight.heading + 180) * DEG_PX).toFixed(1)}px)`;
-    if (h.boost) h.boost.style.transform = `scaleX(${flight.boost.toFixed(3)})`;
+    if (h.tape) h.tape.style.transform = `translateX(${(-(who.heading + 180) * DEG_PX).toFixed(1)}px)`;
+    if (h.boost) h.boost.style.transform = `scaleX(${Math.min(1, who.boost).toFixed(3)})`;
+
+    // motorbikes: the ones parked around this block, which one is in reach, and whether there is ground to land on
+    if (bikes) {
+      const low = who.pos.y < LOW;
+      if (frames.current % 6 === 0 || tr.stale) {
+        const block = low ? `${Math.round(who.pos.x / 40)},${Math.round(who.pos.z / 40)}` : 'high';
+        if (block !== tr.block || tr.stale) {
+          tr.block = block;
+          tr.stale = false;
+          tr.spots = low ? spotsNear(who.pos.x, who.pos.z).filter((sp) => sp.key !== tr.taken) : [];
+          bikes.parked.set(tr.spots, tr.mode !== 'ride');
+        }
+        tr.near = null;
+        if (tr.mode === 'walk') {
+          let best = 3.4;
+          for (const sp of tr.spots) {
+            const d = Math.hypot(sp.x - ground.pos.x, sp.z - ground.pos.z);
+            if (d < best && ground.pos.y < 1) {
+              best = d;
+              tr.near = { x: sp.x, z: sp.z, yaw: sp.yaw, spot: sp };
+            }
+          }
+          if (tr.left && Math.hypot(tr.left.x - ground.pos.x, tr.left.z - ground.pos.z) < best && ground.pos.y < 1) tr.near = { ...tr.left, spot: null };
+        }
+        tr.canLand = tr.mode === 'fly' && low && landSdf(flight.pos.x, flight.pos.z) > 2;
+      }
+      bikes.parked.update(t);
+      const tell = `${tr.mode}|${tr.near ? 1 : 0}|${tr.canLand ? 1 : 0}`;
+      if (tell !== tr.told) {
+        tr.told = tell;
+        onTravel({ mode: tr.mode, nearBike: tr.near !== null, canLand: tr.canLand });
+      }
+    }
 
     // landmark markers: projected to the screen, pinned to the edge when out of view
     const W = state.size.width, H = state.size.height;
@@ -461,8 +696,8 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     LANDMARKS.forEach((lm, i) => {
       const at = LM_POS[i];
       v.p.set(...at);
-      const dist = v.p.distanceTo(flight.pos);
-      const flat = Math.hypot(at[0] - flight.pos.x, at[2] - flight.pos.z);
+      const dist = v.p.distanceTo(who.pos);
+      const flat = Math.hypot(at[0] - who.pos.x, at[2] - who.pos.z);
       if (flat < lm.range && flat < nearDist) {
         near = lm.id;
         nearDist = flat;
@@ -475,7 +710,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
         x = W - x;
         y = H; // a target behind you is shown along the bottom edge
       }
-      let cy = clamp(y, 150, H - 130);
+      let cy = clamp(y, 150, H - 130 - (h.rows > 1 ? 46 : 0));
       let cx = clamp(x, 90, W - 90);
       // HUD panels fill the corners: beside them a marker would be hidden, so it moves to the middle column
       if (W >= 900 && !(cy > 330 && cy < H - 390)) cx = clamp(cx, 380, W - 460);
@@ -499,8 +734,8 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       if (de && label !== s.dist[i]) de.textContent = s.dist[i] = label;
       const tick = h.ticks[i];
       if (tick) {
-        const bearing = (Math.atan2(at[0] - flight.pos.x, -(at[2] - flight.pos.z)) * 180) / Math.PI;
-        const delta = ((bearing - flight.heading + 540) % 360) - 180;
+        const bearing = (Math.atan2(at[0] - who.pos.x, -(at[2] - who.pos.z)) * 180) / Math.PI;
+        const delta = ((bearing - who.heading + 540) % 360) - 180;
         tick.style.transform = `translateX(${(delta * DEG_PX).toFixed(1)}px)`;
         tick.style.opacity = Math.abs(delta) < 50 ? '1' : '0';
       }
@@ -512,7 +747,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       if (ctx) {
         const scale = h.map.width / MAP_PX;
         ctx.setTransform(scale, 0, 0, scale, 0, 0);
-        drawMinimap(ctx, MAP_PX, mapBase, flight.pos.x, flight.pos.z, flight.aimYaw, LANDMARKS, visited.current ?? new Set());
+        drawMinimap(ctx, MAP_PX, mapBase, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, visited.current ?? new Set());
       }
     }
 
@@ -533,6 +768,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       <Effects threshold={day ? 1.6 : 1.15} strength={day ? 0.12 : 0.26} radius={0.45} />
       <primitive object={city.group} />
       <primitive object={rig.yaw} />
+      {bikes && <primitive object={bikes.props} />}
       <primitive object={overlays.group} />
     </>
   );
@@ -546,16 +782,66 @@ const MARKS = Array.from({ length: 49 }, (_, i) => {
   return { deg, label, major: n % 90 === 0 };
 });
 
-const CONTROLS: { keys: string[]; label: string }[] = [
-  { keys: ['W', 'A', 'S', 'D'], label: 'Move' },
-  { keys: ['Mouse'], label: 'Look around' },
-  { keys: ['Shift'], label: 'Boost' },
-  { keys: ['Space'], label: 'Ascend' },
-  { keys: ['C'], label: 'Descend' },
+type Control = { keys: string[]; label: string };
+const COMMON: Control[] = [
   { keys: ['E'], label: 'Open a landmark' },
   { keys: ['M'], label: 'Open the city map' },
-  { keys: ['Esc'], label: 'Free the cursor' },
 ];
+/** The key list follows what the visitor is doing: flying, on foot, or on a motorbike. */
+const controlsFor = (mode: TravelMode, canGround: boolean): Control[] =>
+  mode === 'walk'
+    ? [
+        { keys: ['W', 'A', 'S', 'D'], label: 'Walk, sidestep' },
+        { keys: ['Mouse'], label: 'Look around' },
+        { keys: ['Shift'], label: 'Run' },
+        { keys: ['Space'], label: 'Jump' },
+        { keys: ['F'], label: 'Ride a motorbike' },
+        { keys: ['G'], label: 'Take off' },
+        ...COMMON,
+      ]
+    : mode === 'ride'
+      ? [
+          { keys: ['W', 'A', 'S', 'D'], label: 'Throttle, brake, steer' },
+          { keys: ['Shift'], label: 'Boost' },
+          { keys: ['Space'], label: 'Jump' },
+          { keys: ['H'], label: 'Horn' },
+          { keys: ['F'], label: 'Get off' },
+          { keys: ['G'], label: 'Take off' },
+          ...COMMON,
+        ]
+      : [
+          { keys: ['W', 'A', 'S', 'D'], label: 'Move' },
+          { keys: ['Mouse'], label: 'Look around' },
+          { keys: ['Shift'], label: 'Boost' },
+          { keys: ['Space'], label: 'Ascend' },
+          { keys: ['C'], label: 'Descend' },
+          canGround ? { keys: ['G'], label: 'Land on the street' } : { keys: ['Esc'], label: 'Free the cursor' },
+          ...COMMON,
+        ];
+
+/** "Tin tin": two short notes from a twin-tone horn, made in the browser. */
+function playHorn(ctx: AudioContext) {
+  const out = ctx.createGain();
+  const tone = ctx.createBiquadFilter();
+  tone.type = 'lowpass';
+  tone.frequency.value = 2200;
+  out.connect(tone).connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.01;
+  out.gain.setValueAtTime(0, t0);
+  for (const [at, len] of [[0, 0.13], [0.2, 0.2]]) {
+    out.gain.linearRampToValueAtTime(0.16, t0 + at + 0.012);
+    out.gain.setValueAtTime(0.16, t0 + at + len);
+    out.gain.linearRampToValueAtTime(0, t0 + at + len + 0.03);
+  }
+  for (const hz of [415, 523]) {
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = hz;
+    osc.connect(out);
+    osc.start(t0);
+    osc.stop(t0 + 0.5);
+  }
+}
 
 const Diamond = () => (
   <svg className="lm-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
@@ -594,7 +880,11 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
   const tourCam = useRef<InspectCam | null>(null);
   const viewRef = useRef<HTMLDivElement>(null);
   const flightRef = useRef<Flight | null>(null);
-  const hud = useRef<Hud>({ speed: null, alt: null, hdg: null, tape: null, boost: null, credits: null, map: null, markers: [], dists: [], ticks: [] });
+  const travelRef = useRef<Travel | null>(null);
+  const [travel, setTravel] = useState<TravelState>({ mode: 'fly', nearBike: false, canLand: false });
+  const audio = useRef<AudioContext | null>(null);
+  const canGround = avatar.ground === true && !REAL;
+  const hud = useRef<Hud>({ speed: null, alt: null, hdg: null, tape: null, boost: null, credits: null, map: null, markers: [], dists: [], ticks: [], rows: 1 });
   const live = useRef(false);
   live.current = !loading;
 
@@ -737,8 +1027,21 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
     // the panel is read with the mouse, so hand the cursor back
     if (document.pointerLockElement) document.exitPointerLock();
   };
-  const actions = useRef({ openLandmark, openMap, closeMap, panMap, zoomMap, clearSel: () => setMapSel(null) });
-  actions.current = { openLandmark, openMap, closeMap, panMap, zoomMap, clearSel: () => setMapSel(null) };
+  const honk = () => {
+    if (!travelRef.current?.honk()) return;
+    try {
+      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = (audio.current ??= new Ctx());
+      void ctx.resume();
+      playHorn(ctx);
+    } catch {
+      /* no sound available: the headlight flash still shows the horn */
+    }
+  };
+  useEffect(() => () => void audio.current?.close(), []);
+  const actions = useRef({ openLandmark, openMap, closeMap, panMap, zoomMap, honk, clearSel: () => setMapSel(null) });
+  actions.current = { openLandmark, openMap, closeMap, panMap, zoomMap, honk, clearSel: () => setMapSel(null) };
 
   useEffect(() => {
     const el = viewRef.current!;
@@ -759,6 +1062,12 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
         if (!s.openId && e.code === 'KeyE' && s.nearId) actions.current.openLandmark(s.nearId);
         return;
       }
+      if (down && !e.repeat && live.current && !s.openId && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // leaving the air: G lands or takes off, F gets on or off a motorbike, H is the horn
+        if (e.code === 'KeyG') return travelRef.current?.toggleGround();
+        if (e.code === 'KeyF') return travelRef.current?.toggleBike();
+        if (e.code === 'KeyH') return actions.current.honk();
+      }
       if (!FLIGHT_KEYS.has(e.code)) return;
       // Space on a focused button should press the button, not climb
       if ((e.target as HTMLElement | null)?.closest?.('button, a, input')) return;
@@ -776,7 +1085,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
         if (dragging) actions.current.panMap(e.movementX, e.movementY);
         return;
       }
-      if (document.pointerLockElement === el || dragging) flightRef.current?.look(e.movementX, e.movementY);
+      if (document.pointerLockElement === el || dragging) travelRef.current?.look(e.movementX, e.movementY);
     };
     const onPress = () => {
       dragging = true;
@@ -826,7 +1135,16 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
     if (el && el.width !== MAP_PX * 2) el.width = el.height = MAP_PX * 2; // drawn at 2x for sharp lines
   };
 
-  const prompt = open ? null : near ? `E · Open ${near.name}` : locked ? null : touched ? 'Click the view to steer' : 'Click the view to take control';
+  // what can be done right now, most immediate first
+  const prompts: string[] = [];
+  if (!open) {
+    if (travel.mode === 'walk' && travel.nearBike) prompts.push('F · Ride this motorbike');
+    if (travel.mode === 'fly' && travel.canLand) prompts.push('G · Land on the street');
+    if (near) prompts.push(`E · Open ${near.name}`);
+    if (!locked) prompts.push(touched ? 'Click the view to steer' : 'Click the view to take control');
+  }
+
+  hud.current.rows = Math.min(2, prompts.length);
 
   return (
     <main className={`main main--city${REAL ? ' main--real' : ''}${mapId ? ' is-map' : ''}`}>
@@ -836,7 +1154,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
           gl={{ antialias: false, alpha: false, powerPreference: 'high-performance' }}
           camera={{ fov: 58, near: 1, far: 42000, position: INTRO_CAM.toArray() }}
         >
-          {makeCity && <CityScene makeCity={makeCity} avatar={avatar} day={day} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
+          {makeCity && <CityScene makeCity={makeCity} avatar={avatar} day={day} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
         </Canvas>
       </div>
 
@@ -905,7 +1223,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
         </div>
 
         <ul className="hud-panel hud-keys" aria-label="Controls">
-          {CONTROLS.map((c) => (
+          {controlsFor(travel.mode, canGround).map((c) => (
             <li key={c.label}>
               <span className="keys">
                 {c.keys.map((k) => (
@@ -954,9 +1272,13 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
           </section>
         </div>
 
-        <p className={`hud-prompt${prompt ? '' : ' is-off'}`} role="status">
-          {prompt}
-        </p>
+        <div className="hud-prompts" role="status">
+          {prompts.slice(0, 2).map((p, i) => (
+            <p key={p} className={`hud-prompt${i ? ' hud-prompt--also' : ''}`}>
+              {p}
+            </p>
+          ))}
+        </div>
 
         <p className="hud-narrow">Flying needs a keyboard and a mouse. You can still open each landmark by tapping its marker.</p>
       </div>

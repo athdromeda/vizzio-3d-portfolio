@@ -181,6 +181,41 @@ export function toWorld(u: number, v: number): [number, number, number] {
   return [x, z, Math.atan2(c / det, d / det)]; // three.js: rotation.y = t turns +X toward (cos t, 0, -sin t)
 }
 
+/**
+ * The same as toWorld, for callers that place hundreds of things every frame: two Newton steps on the
+ * analytic Jacobian instead of eight fixed-point rounds, and no arrays made. Writes x, z and the unit
+ * vectors the grid's +x and +z axes point along in the world: out = [x, z, ax.x, ax.z, az.x, az.z].
+ */
+export function gridToWorld(u: number, v: number, out: Float64Array | number[]) {
+  const a = WARP.ax, b = WARP.az;
+  let x = u - (a[0] * Math.sin(v * a[1] + a[2]) + a[3] * Math.sin(v * a[4] + u * a[5] + a[6]));
+  let z = v - (b[0] * Math.sin(u * b[1] + b[2]) + b[3] * Math.sin(u * b[4] + v * b[5] + b[6]));
+  let j00 = 1, j01 = 0, j10 = 0, j11 = 1, det = 1;
+  for (let i = 0; i < 2; i++) {
+    const t1 = z * a[1] + a[2], t2 = z * a[4] + x * a[5] + a[6], p1 = x * b[1] + b[2], p2 = x * b[4] + z * b[5] + b[6];
+    const c2 = a[3] * Math.cos(t2), d2 = b[3] * Math.cos(p2);
+    j00 = 1 + c2 * a[5];
+    j01 = a[0] * a[1] * Math.cos(t1) + c2 * a[4];
+    j10 = b[0] * b[1] * Math.cos(p1) + d2 * b[4];
+    j11 = 1 + d2 * b[5];
+    det = j00 * j11 - j01 * j10;
+    const fx = x + a[0] * Math.sin(t1) + a[3] * Math.sin(t2) - u, fz = z + b[0] * Math.sin(p1) + b[3] * Math.sin(p2) - v;
+    x -= (j11 * fx - j01 * fz) / det;
+    z -= (j00 * fz - j10 * fx) / det;
+  }
+  // columns of the inverse Jacobian: where a step along each grid axis goes in the world
+  let ax = j11 / det, az = -j10 / det, l = Math.hypot(ax, az);
+  out[0] = x;
+  out[1] = z;
+  out[2] = ax / l;
+  out[3] = az / l;
+  ax = -j01 / det;
+  az = j00 / det;
+  l = Math.hypot(ax, az);
+  out[4] = ax / l;
+  out[5] = az / l;
+}
+
 /* ---------- buildings ---------- */
 
 /** What a box is, which decides its facade and roof in the shader. */
@@ -302,6 +337,21 @@ export const getBuildings = () => city().boxes;
 export const getBlocks = () => city().blocks;
 export const getTrees = () => city().trees;
 export const getShips = () => city().ships;
+
+let uses: Map<number, BlockUse> | null = null;
+/** What stands on the block centred on grid step (i, j); null where nothing was built (water, parks, landmarks). */
+export function blockUse(i: number, j: number): BlockUse | null {
+  if (!uses) {
+    uses = new Map();
+    for (const b of city().blocks) uses.set((b.i + 512) * 4096 + (b.j + 512), b.use);
+  }
+  return uses.get((i + 512) * 4096 + (j + 512)) ?? null;
+}
+/** Inside a landmark's plot: street life keeps out, as the generated buildings do. */
+export function inLandmark(x: number, z: number, margin = 0) {
+  for (const r of RESERVED) if (inRect(x, z, r, margin)) return true;
+  return false;
+}
 
 const USABLE = BLOCK - ROAD - 10; // block interior after roads and pavements
 

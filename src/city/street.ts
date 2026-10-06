@@ -1,17 +1,25 @@
-// Street life around the camera: cars and street lamps as real 3D objects.
+// Street life around the camera: vehicles, people, cyclists and street lamps as real 3D objects.
 // The ground shader paints traffic and lamp glow for the whole city, which is all a distant street needs.
-// Close up that reads as flat, so a pool of instances follows the camera: every instance works out, in its
-// vertex shader, which lane or kerb position near the camera it stands for. The formulas are the ground
-// shader's own (see `traffic` in shaders.ts), so a 3D car drives exactly where its painted twin would be.
+// Close up that reads as flat, so real models follow the camera. Where everyone is comes from traffic.ts
+// (a function of the clock, nothing stored); this file turns those positions into instances every frame.
+// The lamps are older and simpler: each works out its own place in its vertex shader.
 import * as THREE from 'three';
-import { BLOCK, GLSL_MAP, GLSL_WARP, ROAD } from './layout';
-import { NOISE, SHARED, WORLD } from './shaders';
+import { BLOCK, GLSL_MAP, GLSL_WARP, ROAD, type ColliderIndex } from './layout';
+import { PERSON_BUILDS, buildCyclist, buildPerson, personMaterial } from './people';
+import { buildProps } from './props';
+import { NOISE, POOL, SHARED, WORLD } from './shaders';
+import { eachCyclist, eachVehicle, eachWalker, flow, lights, type PersonAt, type VehicleAt } from './traffic';
+import { KINDS, SIZE, buildVehicle, livery, vehicleMaterial, type Kind } from './vehicles';
 
-/** Streets either side of the camera's that carry 3D props, and how far along each street they reach, in metres. */
+/** Streets either side of the camera's that carry lamp posts, and how far along each street they reach, in metres. */
 export const POOL_LINES = 6;
 export const POOL_REACH = 640;
-const CAR_SLOT = 30; // metres of lane per car slot, as in the ground shader
 const LAMP_STEP = 27.5;
+/** Inside these distances the full models are used; beyond them the coarse ones. */
+const FINE_CAR = 130;
+const FINE_PERSON = 50;
+/** How far out people are drawn at all. */
+const PEOPLE = 200;
 
 const STREET = /* glsl */ `
 ${GLSL_MAP}
@@ -95,73 +103,6 @@ ${NOISE}
 ${WORLD}
 `;
 
-function carMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: SHARED,
-    vertexShader: /* glsl */ `
-      attribute vec4 aSlot;
-      attribute float aLane;
-      attribute float aPart;
-      uniform float uTime;
-      ${VARYINGS}
-      ${NOISE}
-      ${STREET}
-      void main() {
-        vec2 gc = cameraPosition.xz + warp(cameraPosition.xz);
-        bool ns = aSlot.x < 0.5;
-        float side = aSlot.z, laneI = aLane;
-        // blocks are centred on whole grid steps, so streets run along the half steps
-        float road = floor((ns ? gc.x : gc.y) / BLOCK) + aSlot.y + 0.5;
-        // the ground shader's traffic, lane for lane. Both halves of a street share its id; 'side' picks the half.
-        float laneC = 2.2 + 4.3 * laneI;
-        float lid = (ns ? road : road + 300.0) * 2.0 + laneI;
-        float speed = 0.34 + 0.1 * laneI;
-        float h0 = hash12(vec2(lid, 3.0)) * 20.0;
-        float n = floor((ns ? gc.y : gc.x) * side / ${CAR_SLOT.toFixed(1)} + uTime * speed + h0) + aSlot.w;
-        float shown = step(0.55, hash12(vec2(n, lid)));
-        float along = side * ${CAR_SLOT.toFixed(1)} * (n + 0.115 - uTime * speed - h0);
-        float across = road * BLOCK - side * laneC;
-        vec2 G = ns ? vec2(across, along) : vec2(along, across);
-        float heading = -side;                 // a lane's traffic runs against its 'along' on the + side
-        vPick = hash12(vec2(n, lid + 7.0));
-        vPart = aPart;
-        // one vehicle in twelve is a bus: longer and taller
-        float bus = step(0.915, hash12(vec2(n, lid + 11.0)));
-        vec3 local = position * mix(vec3(1.0), vec3(1.25, 1.9, 2.5), bus);
-        ${PLACE}
-      }`,
-    fragmentShader: /* glsl */ `
-      ${FRAG_HEAD}
-      void main() {
-        vec3 n = normalize(vNormal);
-        vec3 toCam = cameraPosition - vWorld;
-        float dist = length(toCam);
-        vec3 V = toCam / dist;
-        float night = 1.0 - uDay;
-        vec3 paint = vPick < 0.4 ? vec3(0.7, 0.7, 0.7) : vPick < 0.62 ? vec3(0.06, 0.06, 0.07) : vPick < 0.8 ? vec3(0.34, 0.36, 0.4) : vPick < 0.9 ? vec3(0.45, 0.07, 0.05) : vec3(0.08, 0.16, 0.42);
-        float sh = sunShadow(vWorld.xz, vWorld.y + 1.0);
-        vec3 light = ambient(n) * 0.9 + sunRadiance() * max(dot(n, uSun), 0.0) * sh * cloudShade(vWorld.xz);
-        vec3 col;
-        if (vPart > 0.5) {
-          // the glasshouse: dark glass mirroring the sky, pillars at the corners
-          vec3 R = reflect(-V, n);
-          float fres = 0.12 + 0.88 * pow(1.0 - max(dot(V, n), 0.0), 4.0);
-          vec3 glass = mix(vec3(0.02, 0.025, 0.03), skyColor(vec3(R.x, abs(R.y), R.z)), fres);
-          col = vFaceN.y > 0.5 ? paint * light : glass;
-        } else {
-          col = paint * light;
-          col = mix(col, vec3(0.02) * light, step(vLocal.y, 0.42));                     // wheels and sills in shadow
-          // lamps: white ahead, red behind. Faint by day, bright at dusk.
-          float lampBand = step(0.52, vLocal.y) * step(vLocal.y, 0.86) * step(0.45, abs(vLocal.x));
-          col = mix(col, vec3(1.0, 0.93, 0.8) * (0.5 + 5.5 * night), lampBand * step(0.5, vFaceN.z));
-          col = mix(col, vec3(1.0, 0.07, 0.03) * (0.25 + 2.6 * night), lampBand * step(0.5, -vFaceN.z));
-        }
-        col = mix(col, hazeColor(-V), fogAmount(dist));
-        gl_FragColor = vec4(col, 1.0);
-      }`,
-  });
-}
-
 function lampMaterial() {
   return new THREE.ShaderMaterial({
     uniforms: SHARED,
@@ -208,24 +149,161 @@ function lampMaterial() {
   });
 }
 
-export interface StreetLife {
-  group: THREE.Group;
-  /** Call once per rendered view with that view's camera position. */
-  update(camera: THREE.Vector3): void;
+
+/* ---------- instance pools ---------- */
+
+/** An instanced mesh that is refilled every frame: matrices plus a few numbers per instance. */
+class Pool {
+  readonly mesh: THREE.InstancedMesh;
+  n = 0;
+  private m: Float32Array;
+  private extra: { a: THREE.InstancedBufferAttribute; size: number }[] = [];
+
+  constructor(geo: THREE.BufferGeometry, mat: THREE.Material, readonly cap: number, attrs: [string, number][] = []) {
+    this.mesh = new THREE.InstancedMesh(geo, mat, cap);
+    this.mesh.frustumCulled = false; // the instances are wherever the camera is
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.m = this.mesh.instanceMatrix.array as Float32Array;
+    for (const [name, size] of attrs) {
+      const a = new THREE.InstancedBufferAttribute(new Float32Array(cap * size), size);
+      a.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute(name, a);
+      this.extra.push({ a, size });
+    }
+    this.mesh.count = 0;
+  }
+
+  get full() {
+    return this.n >= this.cap;
+  }
+
+  /** Stand an instance at (x, y, z) facing along (fx, fz), scaled. Returns its index, or -1 when the pool is full. */
+  put(x: number, y: number, z: number, fx: number, fz: number, sx = 1, sy = 1, sz = 1) {
+    if (this.n >= this.cap) return -1;
+    const m = this.m, o = this.n * 16;
+    // model +X is the left side, +Z the front
+    m[o] = fz * sx;
+    m[o + 1] = 0;
+    m[o + 2] = -fx * sx;
+    m[o + 3] = 0;
+    m[o + 4] = 0;
+    m[o + 5] = sy;
+    m[o + 6] = 0;
+    m[o + 7] = 0;
+    m[o + 8] = fx * sz;
+    m[o + 9] = 0;
+    m[o + 10] = fz * sz;
+    m[o + 11] = 0;
+    m[o + 12] = x;
+    m[o + 13] = y;
+    m[o + 14] = z;
+    m[o + 15] = 1;
+    return this.n++;
+  }
+
+  /** The numbers of attribute `k` for instance `i`. */
+  data(k: number) {
+    return this.extra[k].a.array as Float32Array;
+  }
+
+  begin() {
+    this.n = 0;
+  }
+
+  end() {
+    this.mesh.count = this.n;
+    this.mesh.visible = this.n > 0;
+    if (!this.n) return;
+    const im = this.mesh.instanceMatrix;
+    im.clearUpdateRanges();
+    im.addUpdateRange(0, this.n * 16);
+    im.needsUpdate = true;
+    for (const { a, size } of this.extra) {
+      a.clearUpdateRanges();
+      a.addUpdateRange(0, this.n * size);
+      a.needsUpdate = true;
+    }
+  }
 }
 
-export function buildStreetLife(): StreetLife {
-  const group = new THREE.Group();
+/** A soft dark patch (shade under a car or a person), or a pool of light on the road. */
+function softTexture(kind: 'shade' | 'beam') {
+  const c = document.createElement('canvas');
+  c.width = 64;
+  c.height = kind === 'beam' ? 128 : 64;
+  const g = c.getContext('2d')!;
+  const img = g.createImageData(c.width, c.height);
+  for (let y = 0; y < c.height; y++) {
+    for (let x = 0; x < c.width; x++) {
+      const u = (x + 0.5) / c.width * 2 - 1, v = (y + 0.5) / c.height;
+      let a: number;
+      if (kind === 'shade') {
+        // a rounded rectangle with a soft edge
+        const w = v * 2 - 1;
+        const d = Math.max(Math.abs(u), Math.abs(w));
+        const r = Math.hypot(Math.max(Math.abs(u) - 0.55, 0), Math.max(Math.abs(w) - 0.55, 0));
+        a = Math.min(1, Math.max(0, (1 - Math.max(d, 0.55 + r)) / 0.3));
+        a = a * a * (3 - 2 * a);
+      } else {
+        // v = 0 at the lamps: bright there, widening and fading down the road
+        const wide = 0.25 + 0.75 * v;
+        const side = Math.exp(-(u * u) / (wide * wide * 0.32));
+        a = side * Math.pow(1 - v, 1.6) * Math.min(1, v * 14);
+      }
+      // an alpha map is read from the green channel
+      const i = (y * c.width + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = Math.round(a * 255);
+      img.data[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.NoColorSpace;
+  return t;
+}
 
-  // a car: body, then a narrower glasshouse set back from the nose. Front is +Z.
-  const carGeo = boxes([
-    { size: [1.8, 0.78, 4.4], at: [0, 0.6, 0], part: 0 },
-    { size: [1.62, 0.52, 2.3], at: [0, 1.25, -0.25], part: 1 },
-  ]);
-  const cs = slots(Math.ceil((POOL_REACH * 2) / CAR_SLOT), 2);
-  const cars = new THREE.InstancedMesh(carGeo, carMaterial(), cs.count);
-  carGeo.setAttribute('aSlot', cs.slot);
-  carGeo.setAttribute('aLane', cs.lane);
+/** Something on the street the pilot cannot walk or ride through: a box, turned the way the vehicle faces. */
+export interface Obstacle {
+  x: number;
+  z: number;
+  fx: number;
+  fz: number;
+  /** Half length and half width, metres. */
+  hl: number;
+  hw: number;
+  top: number;
+  /** Its own velocity, so whoever it runs into is carried along. */
+  vx: number;
+  vz: number;
+}
+
+/** Whoever is on the street under the visitor's control: people step out of the way, vehicles become obstacles. */
+export interface Actor {
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vz: number;
+  /** 1 just after the horn: people give more room. */
+  urge?: number;
+}
+
+export interface StreetLife {
+  group: THREE.Group;
+  /** Vehicles close to the actor, refreshed by each update that was given one. */
+  obstacles: Obstacle[];
+  /**
+   * Call once per rendered view. `main` is false for a side view (a camera still): the lamps follow that
+   * camera, but the vehicles and people stay where the main view put them.
+   */
+  update(camera: THREE.Vector3, time: number, actor?: Actor | null, main?: boolean): void;
+}
+
+/** `colliders`: the buildings, so that shelters and benches are only put where there is room. */
+export function buildStreetLife(colliders: ColliderIndex | null = null): StreetLife {
+  const group = new THREE.Group();
+  const props = buildProps(colliders);
+  group.add(props.group);
 
   // a lamp: post on the pavement, an arm over the kerb, a lantern at its end
   const lampGeo = boxes([
@@ -236,18 +314,193 @@ export function buildStreetLife(): StreetLife {
   const ls = slots(Math.ceil((POOL_REACH * 2) / LAMP_STEP), 1);
   const lamps = new THREE.InstancedMesh(lampGeo, lampMaterial(), ls.count);
   lampGeo.setAttribute('aSlot', ls.slot);
+  lamps.frustumCulled = false; // the vertex shader decides where each instance is
+  group.add(lamps);
 
-  for (const m of [cars, lamps]) {
-    m.frustumCulled = false; // the vertex shader decides where each instance is
-    group.add(m);
-  }
+  // vehicles: a full and a coarse pool per kind, one material for all
+  const carMat = vehicleMaterial();
+  const ATTRS: [string, number][] = [['aPaint', 3], ['aSecond', 3], ['aState', 2]];
+  const share: Record<Kind, number> = { sedan: 1, hatch: 1, suv: 1, mpv: 1, taxi: 1, van: 0.5, pickup: 0.35, bus: 0.35, decker: 0.3, truck: 0.3, hauler: 0.2, moto: 0.8 };
+  const cars = KINDS.map((kind) => ({
+    kind,
+    size: SIZE[kind],
+    fine: new Pool(buildVehicle(kind, true), carMat, Math.ceil(36 * share[kind]) + 6, ATTRS),
+    coarse: new Pool(buildVehicle(kind, false), carMat, Math.ceil(300 * share[kind]), ATTRS),
+  }));
+  for (const c of cars) group.add(c.fine.mesh, c.coarse.mesh);
+
+  // people: three builds and a cyclist, each full and coarse
+  const walkMat = personMaterial(false), rideMat = personMaterial(true);
+  const P_ATTRS: [string, number][] = [['aAnim', 3]];
+  const walkers = PERSON_BUILDS.map((b) => ({ fine: new Pool(buildPerson(b, true), walkMat, 90, P_ATTRS), coarse: new Pool(buildPerson(b, false), walkMat, 280, P_ATTRS) }));
+  const riders = { fine: new Pool(buildCyclist(true), rideMat, 24, P_ATTRS), coarse: new Pool(buildCyclist(false), rideMat, 90, P_ATTRS) };
+  for (const p of [...walkers, riders]) group.add(p.fine.mesh, p.coarse.mesh);
+
+  // shade under everything, and at dusk the light vehicles throw on the road
+  const flat = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+  const shadeMat = new THREE.MeshBasicMaterial({ color: 0x000000, alphaMap: softTexture('shade'), transparent: true, opacity: 0.55, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, fog: false });
+  const shade = new Pool(flat, shadeMat, 1500);
+  shade.mesh.renderOrder = 1;
+  // the beam texture runs from the lamps (v = 0) down the road: turn the plane so +Z is v
+  const beamGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2).translate(0, 0, 0.5);
+  const beamMat = new THREE.MeshBasicMaterial({ color: 0xffffff, alphaMap: softTexture('beam'), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3, fog: false });
+  const beams = new Pool(beamGeo, beamMat, 900);
+  beams.mesh.renderOrder = 2;
+  beams.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(900 * 3), 3);
+  beams.mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  group.add(shade.mesh, beams.mesh);
+
+  const obstacles: Obstacle[] = [];
+  const spare: Obstacle[] = [];
+  const six = new Float32Array(6);
+  const still: PersonAt = { x: 0, z: 0, fx: 0, fz: 1, phase: 0, amount: 0, seed: 0, type: 0 };
+  let cam = new THREE.Vector3(), who: Actor | null = null, night = 0, low = true, near = true;
+
+  const vehicle = (v: VehicleAt) => {
+    const c = cars[v.kind];
+    const d2 = (v.x - cam.x) ** 2 + (v.z - cam.z) ** 2;
+    let pool = d2 < FINE_CAR * FINE_CAR && low && !c.fine.full ? c.fine : c.coarse;
+    if (pool.full) pool = c.fine;
+    const i = pool.put(v.x, 0, v.z, v.fx, v.fz);
+    if (i < 0) return;
+    livery(c.kind, v.h1, v.h2, six, 0);
+    pool.data(0).set(six.subarray(0, 3), i * 3);
+    pool.data(1).set(six.subarray(3, 6), i * 3);
+    const st = pool.data(2);
+    st[i * 2] = v.brake;
+    st[i * 2 + 1] = v.h2;
+    if (!near) return;
+    const s = c.size;
+    if (d2 < 260 * 260) shade.put(v.x, 0.03, v.z, v.fx, v.fz, s.wid + 0.7, 1, s.len + 0.9);
+    if (night > 0.04 && d2 < 230 * 230) {
+      // headlamps on the road ahead, a little red behind
+      const front = s.len / 2 - 0.3;
+      let b = beams.put(v.x + v.fx * front, 0.05, v.z + v.fz * front, v.fx, v.fz, c.kind === 'moto' ? 2.6 : 4.4, 1, 15);
+      if (b >= 0) beams.mesh.instanceColor!.setXYZ(b, 0.075 * night, 0.068 * night, 0.054 * night);
+      b = beams.put(v.x - v.fx * front, 0.05, v.z - v.fz * front, -v.fx, -v.fz, 2.6, 1, 3.2);
+      if (b >= 0) beams.mesh.instanceColor!.setXYZ(b, (0.014 + 0.022 * v.brake) * night, 0.0012 * night, 0.0006 * night);
+    }
+    if (who) {
+      const dx = v.x - who.x, dz = v.z - who.z;
+      if (dx * dx + dz * dz < 32 * 32) {
+        const o = spare.pop() ?? { x: 0, z: 0, fx: 0, fz: 1, hl: 1, hw: 1, top: 1, vx: 0, vz: 0 };
+        o.x = v.x;
+        o.z = v.z;
+        o.fx = v.fx;
+        o.fz = v.fz;
+        o.hl = s.len / 2;
+        o.hw = s.wid / 2;
+        o.top = s.hgt;
+        o.vx = v.fx * v.speed;
+        o.vz = v.fz * v.speed;
+        obstacles.push(o);
+      }
+    }
+  };
+
+  const person = (p: PersonAt) => {
+    let x = p.x, z = p.z, amount = p.amount;
+    if (who) {
+      // step out of the pilot's way: sideways from where they are heading, further the faster they come
+      const dx = x - who.x, dz = z - who.z;
+      const speed = Math.hypot(who.vx, who.vz);
+      const reach = 1.3 + Math.min(speed, 22) * 0.24 + (who.urge ?? 0) * 3.5;
+      const d = Math.hypot(dx, dz);
+      if (d < reach && who.y < 2.5) {
+        const k = 1 - d / reach, push = k * k * (3 - 2 * k) * Math.min(reach * 0.7, 2.4);
+        let ox = dx, oz = dz;
+        if (speed > 1.5) {
+          const sideways = who.vx * dz - who.vz * dx >= 0 ? 1 : -1;
+          ox = (-who.vz / speed) * sideways;
+          oz = (who.vx / speed) * sideways;
+        } else if (d > 0.01) {
+          ox /= d;
+          oz /= d;
+        } else {
+          ox = 1;
+          oz = 0;
+        }
+        x += ox * push;
+        z += oz * push;
+        amount = Math.max(amount, Math.min(1, k * 2));
+      }
+    }
+    const d2 = (x - cam.x) ** 2 + (z - cam.z) ** 2;
+    const set = p.type === 3 ? riders : walkers[Math.min(2, Math.floor(p.seed * 9.99) % 3)];
+    let pool = d2 < FINE_PERSON * FINE_PERSON && !set.fine.full ? set.fine : set.coarse;
+    if (pool.full) pool = set.fine;
+    // height and build vary a little with the same random number that dresses them
+    const tall = p.type === 3 ? 1 : 0.9 + 0.18 * ((p.seed * 7.31) % 1), wide = p.type === 3 ? 1 : 0.9 + 0.22 * ((p.seed * 3.17) % 1);
+    const i = pool.put(x, 0, z, p.fx, p.fz, wide, tall, wide);
+    if (i < 0) return;
+    const a = pool.data(0);
+    a[i * 3] = p.phase;
+    a[i * 3 + 1] = amount;
+    a[i * 3 + 2] = p.seed;
+    if (d2 < 70 * 70) shade.put(x, 0.03, z, p.fx, p.fz, p.type === 3 ? 0.8 : 0.85, 1, p.type === 3 ? 1.9 : 0.85);
+  };
+
   return {
     group,
-    update(camera) {
+    obstacles,
+    update(camera, time, actor = null, main = true) {
       // from high up the props are smaller than a pixel: leave the street to the ground shader
       const on = camera.y < 1100;
       group.visible = on;
       SHARED.uPool.value = on ? 1 : 0;
+      SHARED.uFlow.value.set(flow(time, 0), flow(time, 1));
+      const l = lights(time);
+      SHARED.uSignal.value.set(l.car[0], l.car[1], l.walk[0], l.walk[1]);
+      if (!main || !on) return;
+      cam = camera;
+      who = actor;
+      night = 1 - SHARED.uDay.value;
+      low = camera.y < 260;
+      near = camera.y < 520;
+      for (const o of obstacles) spare.push(o);
+      obstacles.length = 0;
+      for (const c of cars) {
+        c.fine.begin();
+        c.coarse.begin();
+      }
+      for (const p of [...walkers, riders]) {
+        p.fine.begin();
+        p.coarse.begin();
+      }
+      shade.begin();
+      beams.begin();
+      eachVehicle(camera.x, camera.z, time, POOL, vehicle);
+      if (camera.y < 700) props.update(camera);
+      props.group.visible = camera.y < 700;
+      if (camera.y < 340) {
+        eachWalker(camera.x, camera.z, time, PEOPLE, person);
+        eachCyclist(camera.x, camera.z, time, PEOPLE + 80, person);
+        for (const w of props.waiting) {
+          if (Math.abs(w.x - camera.x) > PEOPLE || Math.abs(w.z - camera.z) > PEOPLE) continue;
+          still.x = w.x;
+          still.z = w.z;
+          still.fx = w.fx;
+          still.fz = w.fz;
+          still.seed = w.seed;
+          person(still);
+        }
+      }
+      for (const c of cars) {
+        c.fine.end();
+        c.coarse.end();
+      }
+      for (const p of [...walkers, riders]) {
+        p.fine.end();
+        p.coarse.end();
+      }
+      shade.end();
+      beams.end();
+      if (beams.n) {
+        const ic = beams.mesh.instanceColor!;
+        ic.clearUpdateRanges();
+        ic.addUpdateRange(0, beams.n * 3);
+        ic.needsUpdate = true;
+      }
     },
   };
 }

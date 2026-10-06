@@ -18,6 +18,8 @@ export interface Avatar {
   cruiseLean: number;
   /** Chase camera: metres behind and above the flyer. */
   chase: { back: number; up: number };
+  /** A person, not a machine: can land, walk the streets and ride the parked motorbikes. */
+  ground?: boolean;
 }
 
 export const AVATARS: Avatar[] = [
@@ -27,6 +29,7 @@ export const AVATARS: Avatar[] = [
     callSign: 'KITE-01',
     role: 'Jetsuit pilot',
     placeholder: 'kite',
+    ground: true,
     flight: { topSpeed: 260, climb: 18, turnRate: 90 },
     cruiseLean: 1.25,
     chase: { back: 4.2, up: 1.7 },

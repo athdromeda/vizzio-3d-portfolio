@@ -10,6 +10,11 @@ this file covers what you are inheriting.
 3. **Loading** (`LoadingScreen`): a terminal-style loader while the city builds.
 4. **City statistics** (`CityTour`): eight chapters of figures over views of the city. Plays by itself; skippable.
 5. **Flight** (`CityScreen`): free flight with a chase camera, compass, minimap and landmark markers.
+   One of the three flyers, the pilot "Kite", can also leave the air: `G` lands him on the street, he walks
+   and jumps, and sport motorbikes parked along the pavements can be ridden (`F`), with a horn (`H`).
+   The streets are busy: cars, taxis, buses, lorries and motorbikes queue at working signals, people walk
+   the pavements and cross on the zebra, cyclists ride the kerb. For the pilot the vehicles are solid and
+   the people step aside.
 6. **Landmark console** (`console/`): opens at Marina Bay Sands, the National Stadium and Changi Airport.
    Tabs for environment, security and facilities everywhere; match day, patrol and event archive at the
    stadium; alerts at the airport. Camera tiles open a 360° CCTV viewer.
@@ -63,6 +68,11 @@ The bottom strip reads "Concept exploration. Not an official Vizzio site. Demo d
   with Vizzio's approval.
 - The owner originally wanted film-character flyers. None were made: the placeholders are original, and
   any model you add must be one you have the right to publish.
+- The owner asked for "CBR-style" motorbikes. The model in `city/bike.ts` is an original generic sport
+  bike with no badge or livery. Keep it that way, or use a licensed model.
+- Every vehicle, person and piece of street furniture is an original generic model built in code
+  (`city/vehicles.ts`, `people.ts`, `props.ts`): no make, badge, operator colours or lettering; number
+  plates and advert panels are blank. Bus and taxi colours are plain colours, not a real operator's.
 - Fonts (Sora, Martian Mono) load from Google Fonts, which means a request to Google on every visit. If
   the privacy policy rules that out, self-host them and change the `<link>` in `index.html`.
 
@@ -73,6 +83,11 @@ The bottom strip reads "Concept exploration. Not an official Vizzio site. Demo d
 - the whole flow from globe to flight, without console errors
 - every console tab and drill-down, the CCTV viewer's controls with real mouse clicks
 - all eight tour chapters, all four map menus (markers, layers, 2D/3D, pan, zoom, Esc)
+- the traffic model, numerically: no two vehicles closer than 2 m over a whole signal cycle, no walker or
+  cyclist within 0.25 m of a vehicle over two minutes; and walking into, being pushed by and riding into
+  a vehicle
+- landing, walking, jumping, mounting, riding, leaning, the horn, dismounting and taking off, by stepping
+  the simulation from the test script (`scripts/shot-ground.mjs`, needs a `VITE_TEST=1` build)
 - `npm ci && npm run build` from a clean copy, and the built site served locally
 
 **Not tested:**
@@ -81,7 +96,8 @@ The bottom strip reads "Concept exploration. Not an official Vizzio site. Demo d
   city noticeably heavier and has not been measured on real hardware. The test browser runs at under 1 fps
   (no GPU), so it says nothing about speed. Measure on a typical laptop before launch.
 - **Feel of the controls**: mouse steering and pointer lock in flight, map pan and zoom, CCTV drag. They
-  work; whether they feel right at full frame rate is unjudged.
+  work; whether they feel right at full frame rate is unjudged. The same goes for walking and riding:
+  speeds, steering and the camera were set by reasoning and screenshots, not by playing.
 - **Browsers other than Chromium.** Firefox and Safari have never run it.
 - **A Vercel deployment.**
 - **The real-city path** (below).
@@ -90,8 +106,18 @@ The bottom strip reads "Concept exploration. Not an official Vizzio site. Demo d
 
 - No message when WebGL 2 is unavailable or the GPU context is lost: the visitor gets a blank view.
 - No error boundary around the 3D canvases.
+- On the ground, buildings, ships, the shoreline and vehicles stop the pilot (a moving vehicle shoves him
+  along; a roof can be stood on). Trees, lamp posts and street furniture do not. Colliders of rotated
+  buildings are approximate.
+- Traffic is a timetable, not a simulation (`city/traffic.ts` explains it): vehicles never turn, change
+  lane, or react to the pilot, and every junction in the city changes at the same moment. Nobody sits on
+  the benches. Parks, the waterfront and the airport have no people.
+- Walking and riding are switched off when the real Google tiles are used (`canGround` in
+  `CityScreen.tsx`): there is no street surface to stand on there yet.
+- The horn is two notes from the Web Audio API. Browsers that block audio stay silent; the headlight
+  flash still shows it.
 - Phones and tablets: the layout does not break, but flight needs a keyboard and mouse. A note says so.
-- The single JavaScript file is about 1.5 MB (420 KB gzipped), mostly three.js. It could be split by
+- The single JavaScript file is about 1.55 MB (445 KB gzipped), mostly three.js. It could be split by
   lazy-loading the city screen.
 - Accessibility was considered for the panels (labels, focus, tables behind charts) but the 3D experience
   itself has no non-visual equivalent.
@@ -106,8 +132,12 @@ The bottom strip reads "Concept exploration. Not an official Vizzio site. Demo d
 
 Cheapest cuts first, each in one place:
 
+0. Street life: `POOL` in `city/shaders.ts` (how far out vehicles are 3D; the painted ones take over beyond)
+   and `PEOPLE`, `FINE_CAR`, `FINE_PERSON` in `city/street.ts`. Placing about 1,000 vehicles and 500 people
+   costs roughly 1 ms of JavaScript per frame, measured in Node, not in a browser.
+
 1. Water reflections: the 12-step loop in `makeGroundMaterial` (`city/shaders.ts`). Halve the steps.
-2. 3D traffic: `POOL_LINES` in `city/street.ts` (streets either side of the camera that get 3D cars).
+2. Lamp posts: `POOL_LINES` in `city/street.ts` (streets either side of the camera that get 3D lamp posts).
 3. Roof clutter: `roofGear` in `city/layout.ts` adds about 9,000 small boxes.
 4. Render scale: `dpr={[1, 1.25]}` on the `<Canvas>` in `screens/CityScreen.tsx`. Use `[1, 1]`.
 5. Trees: the `near` detail radius in `buildCity.ts` (`< 1700`).
@@ -130,10 +160,14 @@ never received a tile. On the first run with a key:
 ## 9. Development tooling
 
 `scripts/` holds the Playwright runs used to check each screen (`shot-tour`, `shot-console`, `shot-map`,
-`shot-city-views`). They are not needed to build or deploy. To use them, install a Chromium for
+`shot-city-views`, `shot-ground`). They are not needed to build or deploy. To use them, install a Chromium for
 Playwright and point `CHROME_PATH` at it, then run `npm run build:artifact` (or `build:harness` for the
 city views) first. Steps written `real:name:selector` click with the real mouse; prefer them, because
 `element.click()` passes even when something invisible is covering a button.
+
+`shot-ground` needs a test build (`VITE_TEST=1 npm run build:artifact`), which exposes the simulation as
+`window.__test` so the script can step it; the software renderer is far too slow to play in real time.
+That hook is compiled out of every build made without `VITE_TEST`. Never deploy a test build.
 
 `CLAUDE.md` records the conventions the code follows (coordinate system, how the console talks to the 3D
 scene, design tokens). Read it before changing the city or the console.

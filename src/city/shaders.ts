@@ -3,9 +3,10 @@
 // changes light together. All output linear HDR; tone mapping and bloom happen in <Effects>.
 import * as THREE from 'three';
 import { BLOCK, FOG_DENSITY, GLSL_MAP, GLSL_WARP, MAP_BOX, ROAD, SUN_DAY } from './layout';
+import { BUSY, FRONT0, SLOT, STOP_LINE } from './trafficRules';
 
-/** Half-width of the square around the camera, in street-grid metres, where traffic is 3D. Keep in step with street.ts. */
-const POOL = 590;
+/** Half-width of the square around the camera, in street-grid metres, where traffic is 3D (see street.ts). */
+export const POOL = 480;
 
 /** Shared by every city material. `uDay` runs from 0 (dusk) to 1 (day). */
 export const SHARED = {
@@ -20,6 +21,10 @@ export const SHARED = {
   uGroundMap: { value: null as THREE.Texture | null },
   /** 1 while 3D cars and lamps are drawn around the camera (see street.ts): the painted cars step aside there. */
   uPool: { value: 0 },
+  /** Metres the traffic on north-south (x) and east-west (y) streets has moved so far: one block per green (traffic.ts). */
+  uFlow: { value: new THREE.Vector2() },
+  /** Signal lamps: x, y the traffic lamp per axis (0 green, 1 amber, 2 red); z, w whether people may cross a street of that axis. */
+  uSignal: { value: new THREE.Vector4(0, 2, 0, 0) },
 };
 
 export const NOISE = /* glsl */ `
@@ -174,6 +179,7 @@ export function makeGroundMaterial() {
       const float BLOCK = ${BLOCK.toFixed(1)};
       const float ROAD = ${ROAD.toFixed(1)};
       uniform float uPool;
+      uniform vec2 uFlow;
 
       void main() {
         vec2 p = vWorld.xz;
@@ -308,7 +314,11 @@ export function makeGroundMaterial() {
         float centre = 1.0 - smoothstep(0.14, 0.14 + aw, roadD);
         float dashes = (1.0 - smoothstep(0.1, 0.1 + aw, abs(roadD - 4.4))) * step(fract(along / 10.0), 0.4);
         float zebra = smoothstep(ROAD * 0.5 + 1.2, ROAD * 0.5 + 1.6, other) * (1.0 - smoothstep(ROAD * 0.5 + 4.8, ROAD * 0.5 + 5.2, other)) * step(fract(roadD / 1.3), 0.5);
-        float stopLine = (1.0 - smoothstep(0.25, 0.25 + aw, abs(other - (ROAD * 0.5 + 0.7)))) * step(0.3, roadD);
+        // keep left: on a north-south street the west half runs north, on an east-west one the north half runs east
+        float dir = ns ? -side : side;
+        float u = along * dir;                                   // metres along the direction of travel
+        float toJunction = BLOCK * 0.5 - mod(u, BLOCK);          // distance to the centre of the crossing road ahead
+        float stopLine = 1.0 - smoothstep(0.22, 0.22 + aw, abs(toJunction - ${STOP_LINE.toFixed(2)}));
         float edgeLine = 1.0 - smoothstep(0.08, 0.08 + aw, abs(roadD - (ROAD * 0.5 - 0.45)));
         float mark = max((centre + dashes + edgeLine * 0.6) * (1.0 - junction), max(zebra, stopLine * (1.0 - junction))) * (1.0 - smoothstep(0.25, 0.7, fine));
         asphalt = mix(asphalt, vec3(0.62, 0.62, 0.58), mark * 0.85);
@@ -318,21 +328,24 @@ export function makeGroundMaterial() {
         asphalt = mix(asphalt, grass * 1.15, median * (1.0 - smoothstep(0.4, 0.9, fine)));
         asphalt = mix(asphalt, vec3(0.55, 0.54, 0.51), avenue * (1.0 - smoothstep(0.16, 0.16 + aw, abs(roadD - 1.0))) * smoothstep(ROAD * 0.5 + 5.5, ROAD * 0.5 + 6.5, other) * (1.0 - smoothstep(0.25, 0.7, fine)));
 
-        // traffic: two lanes each way. Far off a car is a painted box by day and a pair of lights at dusk;
-        // around the camera real 3D cars take over (street.ts, same formulas) and only their shade is painted.
+        // traffic: two lanes each way, moving a block at a time with the signals (traffic.ts has the rules).
+        // Far off a car is a painted box by day and a pair of lights at dusk; around the camera real 3D
+        // vehicles take over (street.ts) and nothing is painted.
         float laneI = step(4.4, roadD);
         float laneC = 2.2 + 4.3 * laneI;
-        float lid = roadId * 2.0 + laneI;
-        float cu = along * side / 30.0 + t * (0.34 + 0.1 * laneI) + hash12(vec2(lid, 3.0)) * 20.0;
-        float has = step(0.55, hash12(vec2(floor(cu), lid)));
+        float lid = roadId * 4.0 + laneI * 2.0 + step(side, 0.0);
+        float cu = (u - (ns ? uFlow.x : uFlow.y) - ${FRONT0.toFixed(2)}) / ${SLOT.toFixed(2)};
+        float carN = floor(cu) + 1.0;                 // the car whose nose is next ahead of this spot
+        float back = carN - cu;                       // slots from that nose back to here
+        float has = step(hash12(vec2(carN, lid)), ${BUSY.toFixed(2)}) * (1.0 - step(abs(mod(carN, 4.0) - 2.0), 0.5));
+        float hasBehind = step(hash12(vec2(carN - 1.0, lid)), ${BUSY.toFixed(2)}) * (1.0 - step(abs(mod(carN - 1.0, 4.0) - 2.0), 0.5));
         float inLane = 1.0 - smoothstep(0.85, 1.0, abs(roadD - laneC));
-        float carBody = has * step(0.04, fract(cu)) * step(fract(cu), 0.19) * inLane;
-        float paint = hash12(vec2(floor(cu), lid + 7.0));
+        float carBody = has * step(back, 0.165) * inLane;
+        float paint = hash12(vec2(carN, lid + 7.0));
         vec3 carA = paint < 0.4 ? vec3(0.7, 0.7, 0.7) : paint < 0.62 ? vec3(0.06, 0.06, 0.07) : paint < 0.8 ? vec3(0.34, 0.36, 0.4) : paint < 0.9 ? vec3(0.45, 0.07, 0.05) : vec3(0.08, 0.16, 0.42);
         vec2 gcam = cameraPosition.xz + warp(cameraPosition.xz);
         float pool = uPool * (1.0 - smoothstep(${(POOL - 40).toFixed(1)}, ${POOL.toFixed(1)}, max(abs(g.x - gcam.x), abs(g.y - gcam.y))));
-        asphalt = mix(asphalt, carA, carBody * uDay * (1.0 - smoothstep(0.3, 0.8, fine)) * (1.0 - junction) * (1.0 - pool));
-        asphalt *= 1.0 - 0.6 * carBody * pool;   // the shade under a 3D car
+        asphalt = mix(asphalt, carA, carBody * uDay * (1.0 - smoothstep(0.3, 0.8, fine)) * (1.0 - pool));
         landA = mix(landA, asphalt, road);
 
         vec3 landCol = landA * (amb * ao + sunL);
@@ -343,14 +356,12 @@ export function makeGroundMaterial() {
         float kerb = roadD - (ROAD * 0.5 - 1.5);
         float lamp = exp(-(cell * cell + kerb * kerb) / 22.0);
         // a car throws white light on the road ahead of it and a little red behind
-        float fc = fract(cu);
         float spread = exp(-pow(roadD - laneC, 2.0) / 1.6);
-        float reach = smoothstep(0.62, 1.0, fc);
-        float ahead = step(0.55, hash12(vec2(floor(cu) + 1.0, lid))) * reach * reach;
-        float behind = has * smoothstep(0.34, 0.19, fc) * step(0.19, fc);
-        float self = has * smoothstep(0.0, 0.03, fc) * smoothstep(0.2, 0.12, fc) * (1.0 - pool);   // far off, the car itself is the light
+        float aheadL = hasBehind * pow(1.0 - smoothstep(0.0, 0.42, 1.0 - back), 2.0);
+        float behindL = has * smoothstep(0.34, 0.165, back) * step(0.165, back);
+        float self = has * smoothstep(0.0, 0.03, back) * smoothstep(0.2, 0.12, back);   // far off, the car itself is the light
         vec3 beamCol = side > 0.0 ? vec3(1.0, 0.1, 0.04) : vec3(1.0, 0.9, 0.75);
-        vec3 glowNear = lampCol * lamp * 1.1 + (vec3(1.0, 0.92, 0.78) * ahead * 0.5 + vec3(1.0, 0.08, 0.03) * behind * 0.3 + beamCol * self * 1.6) * spread;
+        vec3 glowNear = lampCol * lamp * 1.1 + (vec3(1.0, 0.92, 0.78) * aheadL * 0.5 + vec3(1.0, 0.08, 0.03) * behindL * 0.3 + beamCol * self * 1.6) * spread * (1.0 - pool);
         vec3 glowFar = lampCol * 0.045 + vec3(0.9, 0.4, 0.25) * 0.012;
         landCol += mix(glowNear, glowFar, fine) * road * night;
         // lit windows and shopfronts spill a little warm light onto the ground at their feet

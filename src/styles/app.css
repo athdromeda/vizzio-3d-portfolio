@@ -1398,10 +1398,17 @@ kbd {
   transform-origin: left;
 }
 
-.hud-prompt {
+.hud-prompts {
   grid-area: prompt;
   align-self: end;
   justify-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.hud-prompt {
   padding: 9px 14px;
   background: var(--signal);
   color: var(--signal-ink);
@@ -1409,11 +1416,14 @@ kbd {
   font-size: var(--t-label);
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  transition: opacity 0.3s var(--ease);
+  animation: console-in 0.3s var(--ease) both;
 }
 
-.hud-prompt.is-off {
-  opacity: 0;
+/* a second thing that can be done: quieter, so the first stays the one live action */
+.hud-prompt--also {
+  background: var(--glass);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
 }
 
 .hud-narrow {
@@ -1451,7 +1461,7 @@ kbd {
   }
 
   .hud-keys,
-  .hud-prompt {
+  .hud-prompts {
     display: none;
   }
 

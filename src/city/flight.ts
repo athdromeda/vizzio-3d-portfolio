@@ -22,6 +22,8 @@ const KEYS = {
   boost: ['ShiftLeft', 'ShiftRight'],
 } as const;
 export const FLIGHT_KEYS = new Set<string>(Object.values(KEYS).flat());
+/** 1 while any key for the action is down. Shared with the ground controls, which use the same keys. */
+export const held = (keys: Set<string>, action: keyof typeof KEYS) => (KEYS[action].some((k) => keys.has(k)) ? 1 : 0);
 
 export class Flight {
   readonly pos = new THREE.Vector3(...START.pos);
@@ -115,7 +117,8 @@ export class Flight {
       }
     }
     if (this.pos.y < MIN_ALT) {
-      this.pos.y = MIN_ALT;
+      // a soft floor: after a take-off from the street the flyer rises to it instead of jumping there
+      this.pos.y += (MIN_ALT - this.pos.y) * (1 - Math.exp(-dt * 3));
       this.vel.y = Math.max(0, this.vel.y);
     }
     if (this.pos.y > MAX_ALT) {

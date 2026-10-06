@@ -2,7 +2,8 @@
 
 An interactive 3D portfolio concept for vizzio.ai, built to replace video demos with something a visitor
 can fly through: a globe of project countries, a choice of flyer, a statistics tour of Singapore, free
-flight over the city, landmark operations consoles with 360° cameras, and a city map with layered data.
+flight over the city (the pilot can also land, walk the streets and ride the parked motorbikes), landmark
+operations consoles with 360° cameras, and a city map with layered data.
 
 **Status: concept build.** It is not an official Vizzio site. Every figure, name, alert and project in it
 is demo data. Read [docs/HANDOFF.md](docs/HANDOFF.md) before putting it in front of the public.
@@ -82,6 +83,8 @@ Locally, copy `.env.example` to `.env.local` and fill it in. Leave it empty to f
 | Where | Keys |
 | --- | --- |
 | Flight | Click the view to steer with the mouse. `W A S D` move, `Shift` boost, `Space` ascend, `C` descend, `Esc` frees the cursor |
+| On foot (the pilot "Kite" only) | `G` when flying low over land sets him down on the street; `G` again takes off. `W A S D` walk and sidestep, `Shift` run, `Space` jump |
+| Motorbike | Walk up to a parked bike and press `F` to get on, `F` again to get off. `W` throttle, `S` brake then reverse, `A D` steer, `Shift` boost, `Space` hop, `H` horn |
 | Landmarks | `E` near a landmark (or click its marker) opens its console. `Esc` steps back one level, `E` closes it |
 | City map | `M` or `1`–`4` open it. Drag to pan, scroll to zoom, click a marker. `Esc` returns to flight |
 | CCTV | Drag the picture to look around, scroll to zoom, arrow keys to pan and tilt |
@@ -93,7 +96,8 @@ Locally, copy `.env.example` to `.env.local` and fill it in. Leave it empty to f
 src/
   App.tsx            stages: globe -> avatar -> city
   screens/           one file per screen (globe, avatar, loading, city, tour, map, toolbar)
-  city/              the generated city, its shaders, flight, and the Google 3D Tiles path
+  city/              the generated city, its shaders, flight, walking and riding, the traffic and people,
+                     and the Google 3D Tiles path
   console/           landmark console: modes, CCTV viewer, charts
   avatars/           placeholder flyer models and the GLB loader
   data/              ALL content: countries, flyers, landmarks, console data, tour figures, map layers

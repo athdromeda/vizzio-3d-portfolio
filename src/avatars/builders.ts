@@ -350,8 +350,10 @@ function kite(m: Mats, fx: Fx) {
   }
 
   // arms: pauldron, tapered sleeves, gauntlet, and a hand-held pod with two micro turbines
+  const joints = { arms: [] as THREE.Group[], legs: [] as THREE.Group[], shins: [] as THREE.Group[], hoses: [] as THREE.Object3D[] };
   for (const s of [-1, 1]) {
     const arm = new THREE.Group();
+    joints.arms.push(arm);
     arm.position.set(s * 0.25, 0.615, 0);
     arm.rotation.set(-0.2, 0, s * 0.46);
     add(arm, sph(0.094), m.paint, [0, 0.005, 0], [0, 0, 0], [1, 0.92, 1.02]);
@@ -376,12 +378,13 @@ function kite(m: Mats, fx: Fx) {
     arm.updateMatrix();
     const end = new THREE.Vector3(0, -0.6, -0.07).applyMatrix4(arm.matrix);
     const mid = new THREE.Vector3(0, -0.3, -0.12).applyMatrix4(arm.matrix);
-    hose(g, [new THREE.Vector3(s * 0.16, 0.36, -0.2), new THREE.Vector3(s * 0.3, 0.3, -0.24), mid, end], 0.011, m.rubber);
+    joints.hoses.push(hose(g, [new THREE.Vector3(s * 0.16, 0.36, -0.2), new THREE.Vector3(s * 0.3, 0.3, -0.24), mid, end], 0.011, m.rubber));
   }
 
   // legs: tapered, with thigh, knee and shin armour, and proper boots
   for (const s of [-1, 1]) {
     const leg = new THREE.Group();
+    joints.legs.push(leg);
     leg.position.set(s * 0.095, 0.02, 0);
     leg.rotation.set(0.12, 0, s * 0.06);
     add(leg, sph(0.1), m.suit, [0, -0.02, 0]);
@@ -389,6 +392,7 @@ function kite(m: Mats, fx: Fx) {
     add(leg, shell(0.108, 0.086, 0.26, 2.2), m.plate, [0, -0.2, 0], [0, s * 0.35, 0]);
     add(leg, rbox(0.05, 0.1, 0.09, 0.015), m.rubber, [s * 0.09, -0.22, -0.01]);
     const shin = new THREE.Group();
+    joints.shins.push(shin);
     shin.position.set(0, -0.48, 0);
     shin.rotation.x = 0.22;
     add(shin, sph(0.074), m.dark);
@@ -406,7 +410,48 @@ function kite(m: Mats, fx: Fx) {
   }
 
   g.rotation.x = 0.07;
+  g.userData.joints = joints;
   return g;
+}
+
+/** How the pilot holds himself. `phase` drives the walk cycle, `amount` (0..1) is how hard he is moving. */
+export interface Stance {
+  mode: 'fly' | 'walk' | 'air' | 'ride';
+  phase?: number;
+  amount?: number;
+}
+
+/**
+ * Poses the pilot's limbs. Angles are about X in each joint's own frame: positive swings a limb back,
+ * negative forward (the model faces +Z). The riding pose assumes the torso itself is leaned 0.6 rad forward.
+ */
+function applyStance(j: { arms: THREE.Group[]; legs: THREE.Group[]; shins: THREE.Group[]; hoses: THREE.Object3D[] }, s: Stance) {
+  const amt = s.amount ?? 0, ph = s.phase ?? 0;
+  // the fuel lines are modelled for the hovering pose; on the ground they would hang in mid-air
+  for (const h of j.hoses) h.visible = s.mode === 'fly';
+  [-1, 1].forEach((side, i) => {
+    const arm = j.arms[i], leg = j.legs[i], shin = j.shins[i];
+    if (s.mode === 'fly') {
+      arm.rotation.set(-0.2, 0, side * 0.46);
+      leg.rotation.set(0.12, 0, side * 0.06);
+      shin.rotation.x = 0.22;
+    } else if (s.mode === 'ride') {
+      // tucked on a sport bike: arms down to the bars, knees up against the tank, feet back on the pegs
+      arm.rotation.set(-1.43, 0, side * 0.1);
+      leg.rotation.set(-1.75, 0, side * 0.2);
+      shin.rotation.x = 2.15;
+    } else if (s.mode === 'air') {
+      arm.rotation.set(-0.35, 0, side * 0.7);
+      leg.rotation.set(side > 0 ? -0.5 : 0.1, 0, side * 0.08);
+      shin.rotation.x = side > 0 ? 0.9 : 0.5;
+    } else {
+      // walking and running: opposite arm and leg swing together, the knee folds as the leg comes forward
+      const p = ph + (i ? Math.PI : 0);
+      leg.rotation.set(Math.sin(p) * 0.62 * amt, 0, side * 0.04);
+      shin.rotation.x = 0.06 + 0.95 * Math.max(0, -Math.cos(p)) * amt;
+      arm.rotation.set(-0.05 - Math.sin(p) * 0.45 * amt, 0, side * 0.2);
+    }
+  });
 }
 
 /* ---------- Scout: survey quadcopter ---------- */
@@ -599,7 +644,20 @@ export function buildPlaceholder(kind: AvatarKind): THREE.Group {
   const root = new THREE.Group();
   root.add(model);
   /** true: showroom pose for previews and thumbnails. false: level, for flight. */
-  root.userData.setPose = (preview: boolean) => (preview ? model.rotation.copy(pose) : model.rotation.set(0, 0, 0));
+  const joints = model.userData.joints as Parameters<typeof applyStance>[0] | undefined;
+  root.userData.setPose = (preview: boolean) => {
+    if (preview) model.rotation.copy(pose);
+    else model.rotation.set(0, 0, 0);
+    if (joints) applyStance(joints, { mode: 'fly' });
+    for (const f of fx.flames) f.visible = true;
+  };
+  /** Pilot only: pose the limbs for flying, walking, a jump or riding. `flames` switches the jets on or off. */
+  if (joints) {
+    root.userData.setStance = (s: Stance, flames: boolean) => {
+      applyStance(joints, s);
+      for (const f of fx.flames) f.visible = flames;
+    };
+  }
   /** 0..1.6, drives exhaust length. Flight sets it from speed. */
   root.userData.throttle = 0.6;
   root.userData.tick = (t: number) => {
