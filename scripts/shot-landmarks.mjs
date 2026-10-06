@@ -1,0 +1,31 @@
+import { chromium } from 'playwright-core';
+import { readFileSync } from 'node:fs';
+const out = process.argv[2];
+const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
+const logs = [];
+const page = await browser.newPage({ viewport: { width: 1000, height: 620 } });
+page.on('console', (m) => ['error', 'warning'].includes(m.type()) && logs.push(m.text().slice(0, 600)));
+page.on('pageerror', (e) => logs.push('PAGEERROR ' + String(e).slice(0, 400)));
+const frag = readFileSync('artifact/vizzio-3d-portfolio.html', 'utf8');
+await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0;font:14px system-ui;background:#faf9f5}[hidden]{display:none!important}</style></head><body>${frag}</body></html>`, { waitUntil: 'load' });
+await page.waitForTimeout(800);
+await page.click('#row-sg'); await page.waitForTimeout(400);
+await page.click('#enter-country');
+await page.waitForSelector('#take-off:not([disabled])', { timeout: 60000 });
+await page.click('#take-off');
+await page.waitForSelector('.loading', { state: 'detached', timeout: 180000 });
+await page.waitForTimeout(Number(process.argv[3] ?? 75000));
+await page.screenshot({ path: `${out}/l-hud.png` });
+for (const id of ['mbs', 'stadium', 'airport']) {
+  await page.evaluate((i) => document.querySelector('#marker-' + i).click(), id);
+  await page.waitForTimeout(Number(process.argv[4] ?? 45000));
+  if (id === 'mbs') await page.hover('.chart-col:nth-child(3)');
+  await page.screenshot({ path: `${out}/l-${id}.png` });
+  await page.keyboard.press('KeyE');
+  await page.waitForTimeout(1500);
+}
+const visited = await page.textContent('.hud-place .stat dd');
+const panelGone = (await page.locator('.lm-panel').count()) === 0;
+console.log(JSON.stringify({ visited, panelGone }));
+console.log(JSON.stringify(logs.filter((l) => !l.includes('ERR_TUNNEL') && !l.includes('THREE.Clock') && !l.includes('PCFSoft'))));
+await browser.close();

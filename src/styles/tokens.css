@@ -1,0 +1,52 @@
+/* Layout: full-bleed globe stage; HUD chrome pinned to the edges (top bar, left index rail,
+   bottom strip), the way an operations dashboard frames a live map. */
+/* One deliberate look: deep-space ground. Set explicitly so it reads on any host theme. */
+:root {
+  color-scheme: dark;
+
+  /* Color */
+  --space: #04070d;            /* ground: blue-black, never pure black */
+  --space-2: #0a111c;          /* raised surface */
+  --glass: rgba(9, 15, 26, 0.74); /* HUD panel over the globe */
+  --line: rgba(214, 226, 255, 0.14);
+  --line-strong: rgba(214, 226, 255, 0.3);
+  --ink: #f1f5fa;
+  --ink-2: rgba(241, 245, 250, 0.66);
+  --ink-3: rgba(241, 245, 250, 0.42);
+  --signal: #2f5bff;           /* accent: electric blue, used for the one live path */
+  --signal-ink: #ffffff;
+  --signal-soft: #7fa0ff;      /* signal, lightened: data text, lamps, readout accents on dark */
+  --live: #3ddca0;             /* semantic: live / healthy. Not the accent. */
+  --warn: #f0b34a;             /* semantic: below target. Always shown with a text label. */
+  --crit: #e66767;             /* semantic: needs action now. Always shown with a text label. */
+
+  /* Categorical series, in this fixed order (validated as a set on the dark surface). Never reuse the
+     status colours above for a series, and never give a series colour to text. */
+  --cat-1: #3987e5;
+  --cat-2: #d95926;
+  --cat-3: #9085e9;
+  --cat-4: #d55181;
+
+  /* Type */
+  --font-display: 'Sora', 'Avenir Next', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'Sora', 'Avenir Next', 'Segoe UI', system-ui, sans-serif;
+  --font-data: 'Martian Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --t-hero: clamp(2rem, 1.2rem + 2.6vw, 3.5rem);
+  --t-title: 1.75rem;
+  --t-stat: 2rem;
+  --t-body: 0.9375rem;
+  --t-small: 0.8125rem;
+  --t-label: 0.6875rem;        /* mono caps */
+
+  /* Space: steps of 4 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-12: 48px;
+
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
