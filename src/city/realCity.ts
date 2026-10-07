@@ -13,6 +13,7 @@ import type { City } from './buildCity';
 import { ION_ASSET, ORIGIN } from './geo';
 import { ColliderIndex, SUN_DAY } from './layout';
 import { SHARED, makeSkyMaterial } from './shaders';
+import { TileCreasedNormalsPlugin } from './tiles/TileCreasedNormalsPlugin';
 
 /** Draco decoder for the tiles' meshes. Google hosts it; to self-host, copy three/examples/jsm/libs/draco/gltf into public/draco and point here. */
 const DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
@@ -31,6 +32,8 @@ export function buildRealCity(): City {
   tiles.registerPlugin(new TileCompressionPlugin());
   tiles.registerPlugin(new UnloadTilesPlugin());
   tiles.registerPlugin(new TilesFadePlugin());
+  // Google's tiles ship near-flat normals; give them creased ones so the atmosphere can shade edges
+  tiles.registerPlugin(new TileCreasedNormalsPlugin({ creaseAngle: Math.PI / 6 }));
   // puts the origin (lat/lon in radians) at 0,0,0 with +Y up, +Z north and +X west ...
   tiles.registerPlugin(new ReorientationPlugin({ lat: (ORIGIN.lat * Math.PI) / 180, lon: (ORIGIN.lon * Math.PI) / 180, height: 0 }));
   tiles.errorTarget = 12; // screen-space error in pixels: lower is sharper and heavier
@@ -64,6 +67,10 @@ export function buildRealCity(): City {
       attached = camera;
       tiles.setCamera(camera);
       tiles.setResolutionFromRenderer(camera, renderer);
+    },
+    registerMapCamera(camera, size) {
+      tiles.setCamera(camera);
+      tiles.setResolution(camera, size, size);
     },
     surfaceBelow(x, y, z) {
       ray.set(from.set(x, y + 400, z), down);
