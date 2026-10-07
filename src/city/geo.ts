@@ -4,8 +4,11 @@
 // In stand-in mode it returns the point untouched.
 import type { V3 } from '../data/ops';
 
-/** True when a Google Maps Platform key is configured (see .env.example). */
-export const REAL = Boolean(import.meta.env.VITE_GOOGLE_MAPS_KEY);
+/** True when a Cesium ion token is configured (see .env.example). */
+export const REAL = Boolean(import.meta.env.VITE_CESIUM_ION_TOKEN);
+
+/** Cesium ion asset holding Google Photorealistic 3D Tiles. */
+export const ION_ASSET = '2275207';
 
 /** Local origin of the real scene: the middle of Marina Bay. Metres from here, +X east, +Z south, +Y up. */
 export const ORIGIN = { lat: 1.2847, lon: 103.861 };

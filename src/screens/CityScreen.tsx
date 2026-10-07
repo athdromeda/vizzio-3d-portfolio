@@ -13,6 +13,7 @@ import { buildAssetScene, buildOverlays, cameraWall } from '../city/overlays';
 import { Console } from '../console/Console';
 import { NO_OVERLAY, type Anchor, type InspectCam, type SceneOverlay, type SnapJob } from '../console/engine';
 import { Effects } from '../components/Effects';
+import { AtmosphereSky } from '../components/AtmosphereSky';
 import type { Avatar } from '../data/avatars';
 import type { Country } from '../data/countries';
 import { LANDMARKS } from '../data/landmarks';
@@ -763,9 +764,14 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
 
   return (
     <>
-      {/* dusk: facades and ground stay under 1; lit windows, lamps and the sun cross it and glow.
-          By day only the sun and its glints on glass and water do. */}
-      <Effects threshold={day ? 1.6 : 1.15} strength={day ? 0.12 : 0.26} radius={0.45} />
+      {/* real mode: atmosphere sky + its own composer. stand-in: the bloom pass below. */}
+      {REAL ? (
+        <AtmosphereSky />
+      ) : (
+        /* dusk: facades and ground stay under 1; lit windows, lamps and the sun cross it and glow.
+           By day only the sun and its glints on glass and water do. */
+        <Effects threshold={day ? 1.6 : 1.15} strength={day ? 0.12 : 0.26} radius={0.45} />
+      )}
       <primitive object={city.group} />
       <primitive object={rig.yaw} />
       {bikes && <primitive object={bikes.props} />}
@@ -863,10 +869,10 @@ interface Props {
 export type CityMode = 'fly' | 'tour' | 'console' | 'map';
 
 export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMode }: Props) {
-  // the real-tiles code is only fetched when a key is configured; the stand-in city is always at hand
-  const [makeCity, setMakeCity] = useState<(() => City) | null>(() => (import.meta.env.VITE_GOOGLE_MAPS_KEY ? null : buildCity));
+  // the real-tiles code is only fetched when a Cesium ion token is configured; the stand-in city is always at hand
+  const [makeCity, setMakeCity] = useState<(() => City) | null>(() => (REAL ? null : buildCity));
   useEffect(() => {
-    if (import.meta.env.VITE_GOOGLE_MAPS_KEY) import('../city/realCity').then((m) => setMakeCity(() => m.buildRealCity));
+    if (REAL) import('../city/realCity').then((m) => setMakeCity(() => m.buildRealCity));
   }, []);
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1151,7 +1157,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
       <div className="city-view" ref={viewRef}>
         <Canvas
           dpr={[1, 1.25]}
-          gl={{ antialias: false, alpha: false, powerPreference: 'high-performance' }}
+          gl={{ antialias: false, alpha: false, powerPreference: 'high-performance', depth: !REAL }}
           camera={{ fov: 58, near: 1, far: 42000, position: INTRO_CAM.toArray() }}
         >
           {makeCity && <CityScene makeCity={makeCity} avatar={avatar} day={day} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}

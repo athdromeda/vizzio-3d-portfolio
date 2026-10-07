@@ -64,16 +64,16 @@ deployed to Vercel by the author: treat the first deployment as the test.
 
 | Name | Required | Purpose |
 | --- | --- | --- |
-| `VITE_GOOGLE_MAPS_KEY` | No | Google Maps Platform key with the **Map Tiles API** enabled. When set, the city is Google's Photorealistic 3D Tiles instead of the generated stand-in. |
+| `VITE_CESIUM_ION_TOKEN` | No | Cesium ion access token with the Google Photorealistic 3D Tiles asset (`2275207`). When set, the city is real 3D tiles lit by the takram atmosphere instead of the generated stand-in. |
 
 Things to know before setting it:
 
 - It is read **at build time**. After adding or changing it in Vercel, redeploy.
-- Any variable starting with `VITE_` ends up in the JavaScript the browser downloads, so this key is
-  public. That is normal for Maps keys, and the protection is on Google's side: in Google Cloud Console
-  restrict the key to your site's domains (HTTP referrers) and to the Map Tiles API only.
-- Google bills tile usage. Set a budget alert before sharing the link.
-- The real-city path has never been run against Google's servers. See "Real city: first run" in
+- Any variable starting with `VITE_` ends up in the JavaScript the browser downloads, so this token is
+  public. Scope it on Cesium's side (restrict the token, and the asset it can reach) rather than relying
+  on it staying secret.
+- Cesium bills tile usage. Set a budget alert before sharing the link.
+- The real-city path has never been run against Cesium ion. See "Real city: first run" in
   [docs/HANDOFF.md](docs/HANDOFF.md).
 
 Locally, copy `.env.example` to `.env.local` and fill it in. Leave it empty to fly over the stand-in city.
@@ -97,7 +97,7 @@ src/
   App.tsx            stages: globe -> avatar -> city
   screens/           one file per screen (globe, avatar, loading, city, tour, map, toolbar)
   city/              the generated city, its shaders, flight, walking and riding, the traffic and people,
-                     and the Google 3D Tiles path
+                     and the Cesium ion 3D Tiles path
   console/           landmark console: modes, CCTV viewer, charts
   avatars/           placeholder flyer models and the GLB loader
   data/              ALL content: countries, flyers, landmarks, console data, tour figures, map layers
