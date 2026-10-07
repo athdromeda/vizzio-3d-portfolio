@@ -8,7 +8,8 @@ import { Ground } from '../city/ground';
 import { GROUND_Y, REAL, place } from '../city/geo';
 import { FLIGHT_KEYS, Flight } from '../city/flight';
 import { START, getBuildings, landSdf, type Collider } from '../city/layout';
-import { drawMinimap, makeMinimapBase } from '../city/minimap';
+import { MINIMAP_RANGE, MINIMAP_WATER_HEX, drawMinimap, makeMinimapBase, drawMinimapTile } from '../city/minimap';
+import { makeMinimap3D } from '../city/minimap3d';
 import { buildAssetScene, buildOverlays, cameraWall } from '../city/overlays';
 import { Console } from '../console/Console';
 import { NO_OVERLAY, type Anchor, type InspectCam, type SceneOverlay, type SnapJob } from '../console/engine';
@@ -34,6 +35,9 @@ const INTRO_SECONDS = 3.4;
 const DEG_PX = 4; // compass tape: pixels per degree
 const TAG_STEM = 12; // console tags: length of the leader line, matches .tag3d in app.css
 const MAP_PX = 168;
+/** Real tiles have no pre-drawn map: render the loaded tiles top-down for the minimap instead. */
+const MINIMAP_3D = REAL || Boolean(import.meta.env.VITE_MINIMAP_3D);
+const MINIMAP3D_SIZE = 256;
 const FOV = 58;
 /** City map camera: how far above the horizon it looks from, tilted and straight down (a hair off vertical so "up" stays north). */
 const MAP_TILT = 0.92, MAP_FLAT = 1.5;
@@ -163,7 +167,13 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     bank.add(lean);
     return { yaw, bank, lean };
   }, []);
-  const mapBase = useMemo(makeMinimapBase, []);
+  const mapBase = useMemo(() => (MINIMAP_3D ? null : makeMinimapBase()), []);
+  // the real minimap is a small top-down render of the tiles: a camera, a target and a readback canvas
+  const minimap3d = useMemo(() => (MINIMAP_3D ? makeMinimap3D(MINIMAP3D_SIZE) : null), []);
+  useEffect(() => () => minimap3d?.dispose(), [minimap3d]);
+  useEffect(() => {
+    if (minimap3d) city.registerMapCamera?.(minimap3d.camera, MINIMAP3D_SIZE);
+  }, [minimap3d, city]);
   const model = useRef<THREE.Object3D | null>(null);
   const frames = useRef(0);
   const intro = useRef(0);
@@ -364,9 +374,12 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     if (e0 && e0.version !== city.lightVersion) {
       if (e0.version >= 0) onLight();
       e0.version = city.lightVersion;
-      e0.target?.dispose();
-      e0.target = e0.pmrem.fromScene(city.envScene, 0, 1, 1000);
-      scene.environment = e0.target.texture;
+      // real mode: AtmosphereSky owns scene.environment (the real sky), so skip the stand-in bake
+      if (!REAL) {
+        e0.target?.dispose();
+        e0.target = e0.pmrem.fromScene(city.envScene, 0, 1, 1000);
+        scene.environment = e0.target.texture;
+      }
     }
     const touring = tour.current;
     if (live.current && !touring) intro.current = Math.min(1, intro.current + dt / INTRO_SECONDS);
@@ -594,6 +607,8 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       actor.vz = ground.vel.z;
       actor.urge = t - ground.honkAt < 1.2 ? 1 : 0;
     }
+    // aim the minimap camera before the city updates, so the tiles it needs are queued this frame
+    minimap3d?.pose(who.pos.x, who.pos.z, MINIMAP_RANGE);
     city.update(t, camera.position, tr.mode === 'fly' ? null : actor);
 
     // console tags and map pins: pinned to their place in the city. One that would sit under a side column
@@ -748,7 +763,17 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       if (ctx) {
         const scale = h.map.width / MAP_PX;
         ctx.setTransform(scale, 0, 0, scale, 0, 0);
-        drawMinimap(ctx, MAP_PX, mapBase, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, visited.current ?? new Set());
+        const here = visited.current ?? new Set<string>();
+        if (minimap3d) {
+          try {
+            const tile = minimap3d.render(gl, city.group, who.pos.x, who.pos.z, MINIMAP_RANGE, MINIMAP_WATER_HEX);
+            drawMinimapTile(ctx, MAP_PX, tile, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, LM_POS, here);
+          } catch {
+            // a lost tile or a readback failure: keep the last frame rather than break the loop
+          }
+        } else if (mapBase) {
+          drawMinimap(ctx, MAP_PX, mapBase, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, LM_POS, here);
+        }
       }
     }
 

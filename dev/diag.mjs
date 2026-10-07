@@ -1,0 +1,44 @@
+import { createServer } from 'node:http';
+import { readFileSync, existsSync } from 'node:fs';
+import { join, extname } from 'node:path';
+import { chromium } from 'playwright-core';
+const root = 'artifact';
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
+const server = createServer((req, res) => {
+  const p = join(root, decodeURIComponent((req.url ?? '/').split('?')[0]));
+  if (!existsSync(p)) return res.writeHead(404).end('x');
+  res.writeHead(200, { 'content-type': types[extname(p)] ?? 'application/octet-stream' });
+  res.end(readFileSync(p));
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const url = `http://127.0.0.1:${server.address().port}/vizzio-3d-portfolio.html`;
+const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? '/usr/bin/google-chrome', args: ['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--ignore-gpu-blocklist','--no-sandbox'] });
+const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+page.setDefaultTimeout(300000);
+const net = [];
+page.on('response', (r) => /cesium|3dtiles|\.glb/.test(r.url()) && net.push(r.status() + ' ' + r.url().slice(0, 90)));
+page.on('pageerror', (e) => console.log('PAGEERR', String(e).slice(0,200)));
+await page.goto(url, { waitUntil: 'load' });
+await page.waitForTimeout(2000);
+await page.click('#row-sg'); await page.waitForTimeout(400);
+await page.click('#enter-country');
+await page.waitForSelector('#take-off:not([disabled])', { timeout: 60000 });
+await page.evaluate(() => document.querySelector('#avatar-kite').click());
+await page.waitForTimeout(1200);
+await page.evaluate(() => document.querySelector('#take-off').click());
+await page.waitForSelector('.loading', { state: 'detached', timeout: 300000 });
+await page.evaluate(() => document.querySelector('#tour-skip')?.click());
+await page.evaluate(() => window.__test?.arrive());
+await page.waitForTimeout(30000);
+const d = await page.evaluate(() => {
+  const t = window.__test;
+  let meshes = 0, geoms = 0;
+  t.city.group.traverse((o) => { if (o.isMesh) { meshes++; if (o.geometry?.attributes?.position) geoms++; } });
+  const mc = document.querySelector('.hud-map canvas');
+  const md = mc ? mc.getContext('2d').getImageData(0,0,mc.width,mc.height).data : null;
+  let dark = 0, n = 0; if (md) for (let i=0;i<md.length;i+=4){ if (md[i]<40&&md[i+1]<40&&md[i+2]<40) dark++; n++; }
+  return { real: !!t.city.credits, credits: document.querySelector('.credits')?.textContent?.slice(0,80), meshes, geoms, mapDarkPct: n?Math.round(dark/n*100):null, cam: t.city.registerMapCamera? 'has-registerMapCamera':'MISSING' };
+});
+console.log('DIAG', JSON.stringify(d));
+console.log('NET', JSON.stringify(net.slice(0, 8)), 'total', net.length);
+await browser.close(); server.close();

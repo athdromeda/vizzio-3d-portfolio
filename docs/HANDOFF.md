@@ -162,6 +162,21 @@ wiring does not crash. It has never received a tile. On the first run with a tok
 7. The Day / Dusk switch is hidden in this mode: the tiles carry their own baked daylight.
 8. Watch the Cesium ion billing page during the first session.
 
+The realism pass adds three things, all in this mode only:
+
+- **Creased normals** (`city/tiles/`, registered in `realCity.ts`): Google's tiles ship near-flat normals;
+  a worker recomputes per-face normals so the atmosphere's sun/sky light can shade edges. `creaseAngle`
+  (`Math.PI / 6`) is the knob — larger creases more.
+- **Sky environment map** (`components/AtmosphereSky.tsx`): the sky is rendered into a 64px cube map and
+  set as `scene.environment` so the flyer reflects the real sky, not the stand-in one. `CityScreen` skips
+  its stand-in bake when `REAL`. Lower the cube `resolution`/`frames` if it costs too much.
+- **Lens flare** (`LensFlare` in the same composer): `intensity` (default `0.005`) is the knob.
+- **Volumetric clouds** (`@takram/three-clouds`, mounted in `AtmosphereSky` before `AerialPerspective`):
+  shape/weather/turbulence textures are generated in code, the STBN noise is self-hosted
+  (`public/clouds/stbn.bin`), so nothing is fetched from a CDN. Clouds are the heaviest pass; if the
+  frame rate suffers, lower `qualityPreset` (`low` already) or its `resolutionScale`, or turn off
+  `haze`/`lightShafts`. They cast their shadows onto the tiles through `AerialPerspective`.
+
 ## 9. Development tooling
 
 `scripts/` holds the Playwright runs used to check each screen (`shot-tour`, `shot-console`, `shot-map`,

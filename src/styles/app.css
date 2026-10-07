@@ -3696,10 +3696,6 @@ button.c-feed-open:hover strong {
   display: none;
 }
 
-.main--real .hud-map {
-  display: none;
-}
-
 /* ---------- Icons: one stroke weight, coloured by the text around them ---------- */
 
 .icon {

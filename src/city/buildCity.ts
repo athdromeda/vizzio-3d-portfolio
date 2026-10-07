@@ -40,6 +40,8 @@ export interface City {
   setDay(day: boolean, instant?: boolean): void;
   /** Real tiles only: the camera whose view decides which tiles to load. */
   attach?(camera: THREE.Camera, renderer: THREE.WebGLRenderer): void;
+  /** Real tiles only: a second camera (the minimap's top-down view) that tile detail should also follow. */
+  registerMapCamera?(camera: THREE.Camera, size: number): void;
   /** Real tiles only: height of the highest surface under a point, or null where nothing has loaded yet. */
   surfaceBelow?(x: number, y: number, z: number): number | null;
   /** Real tiles only: the data attribution that must stay on screen. */
