@@ -62,6 +62,15 @@ export class Ground {
     private radius: number,
   ) {}
 
+  /** Point the walker at another city: its colliders and traffic, and its map frame. */
+  setFrame(colliders: ColliderIndex, obstacles: Obstacle[] | undefined, centre: THREE.Vector2, radius: number) {
+    this.colliders = colliders;
+    this.obstacles = obstacles ?? [];
+    this.centre = centre;
+    this.radius = radius;
+    this.carrier = null;
+  }
+
   get heading() {
     return ((this.aimYaw * 180) / Math.PI % 360 + 360) % 360;
   }

@@ -60,7 +60,8 @@ export const TOUR: TourChapter[] = [
     id: 'population',
     name: 'Population',
     seconds: 11,
-    shot: { target: [480, 60, -40], radius: 1500, height: 900, angle: 2.5, spin: 0.02 },
+    // height stays under the takram cloud band (base 750 m) so the camera is not inside a cloud
+    shot: { target: [480, 60, -40], radius: 1500, height: 600, angle: 2.5, spin: 0.02 },
     blocks: [
       { kind: 'lines', title: 'Population trend, million', labels: YEARS, values: [5.61, 5.61, 5.64, 5.7, 5.69, 5.45, 5.64, 5.92, 6.04], unit: 'M' },
       {
@@ -190,7 +191,8 @@ export const TOUR: TourChapter[] = [
     id: 'economy',
     name: 'Economy',
     seconds: 11,
-    shot: { target: [-700, 0, -1100], radius: 520, height: 1150, angle: 1, spin: 0.02 },
+    // lifted above the cloud band (and the radius with it) to keep the same steep framing
+    shot: { target: [-700, 0, -1100], radius: 1100, height: 2400, angle: 1, spin: 0.02 },
     blocks: [
       { kind: 'stats', items: [{ label: 'GDP, Q3 2024', value: '140,279.4', unit: 'S$ M', change: { value: '+5.4%', period: 'quarterly', good: true } }] },
       { kind: 'columns', title: 'GDP by quarter, S$ billion', labels: ['Q2 23', 'Q3 23', 'Q4 23', 'Q1 24', 'Q2 24', 'Q3 24'], values: [124.8, 128.1, 131.9, 133.4, 136.2, 140.3] },

@@ -7,6 +7,18 @@ import type { V3 } from '../data/ops';
 /** True when a Cesium ion token is configured (see .env.example). */
 export const REAL = Boolean(import.meta.env.VITE_CESIUM_ION_TOKEN);
 
+/** Which city is on screen: the streaming real tiles, or the generated stand-in. */
+export type World = 'real' | 'simple';
+
+let active: World = REAL ? 'real' : 'simple';
+
+export const getWorld = (): World => active;
+
+/** The whole app has one active world at a time; call this before the state update that swaps it. */
+export const setWorld = (w: World): void => {
+  active = w;
+};
+
 /** Cesium ion asset holding Google Photorealistic 3D Tiles. */
 export const ION_ASSET = '2275207';
 
@@ -44,9 +56,9 @@ const SHIFT = ANCHORS.map((a) => {
   return { x: a.standIn[0], z: a.standIn[1], dx: r[0] - a.standIn[0], dz: r[2] - a.standIn[1] };
 });
 
-/** A stand-in point's place in the city that is actually on screen. */
+/** A stand-in point's place in the city that is actually on screen. Identity for the simplified city. */
 export function place(p: V3): V3 {
-  if (!REAL) return p;
+  if (!REAL || active === 'simple') return p;
   let best = SHIFT[0], bestD = Infinity;
   for (const s of SHIFT) {
     const d = (p[0] - s.x) ** 2 + (p[2] - s.z) ** 2;
@@ -56,4 +68,24 @@ export function place(p: V3): V3 {
     }
   }
   return [p[0] + best.dx, p[1] + GROUND_Y, p[2] + best.dz];
+}
+
+/**
+ * Inverse of place(): where a point in the city that is on screen sits in the stand-in map.
+ * Picks the anchor whose real position is nearest p and undoes its shift and the ground lift.
+ * Used once per real -> simplified landing.
+ */
+export function unplace(p: V3): V3 {
+  if (!REAL) return p;
+  let best: V3 = [p[0], p[1] - GROUND_Y, p[2]];
+  let bestD = Infinity;
+  for (const a of ANCHORS) {
+    const r = fromLatLon(a.lat, a.lon);
+    const d = (p[0] - r[0]) ** 2 + (p[2] - r[2]) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = [p[0] - (r[0] - a.standIn[0]), p[1] - GROUND_Y, p[2] - (r[2] - a.standIn[1])];
+    }
+  }
+  return best;
 }

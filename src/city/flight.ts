@@ -60,6 +60,20 @@ export class Flight {
     this.turn = (avatar.flight.turnRate * Math.PI) / 180;
   }
 
+  /** Point the flyer at another city: its colliders (real tiles: empty), its terrain probe, and its map frame. */
+  setFrame(
+    colliders: ColliderIndex,
+    terrain: ((x: number, y: number, z: number) => number | null) | null,
+    centre: THREE.Vector2,
+    radius: number,
+  ) {
+    this.colliders = colliders;
+    this.terrain = terrain;
+    this.centre.copy(centre);
+    this.radius = radius;
+    this.floor = 0;
+  }
+
   /** Throttle 0..1.6 for exhaust effects. */
   get throttle() {
     return clamp(this.speed / this.maxSpeed, 0, 1.6);

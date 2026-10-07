@@ -4193,3 +4193,80 @@ button.c-feed-open:hover strong {
     animation: none;
   }
 }
+
+/* ---------- Land confirm (real tiles -> simplified city) ---------- */
+
+.land-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--s-6);
+  background: rgba(4, 7, 13, 0.62);
+}
+
+.land-confirm__panel {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  padding: var(--s-6);
+  background: var(--glass);
+  border: 1px solid var(--line-strong);
+  backdrop-filter: blur(14px);
+  animation: panel-in 0.4s var(--ease) both;
+}
+
+.land-confirm__panel h2 {
+  font-family: var(--font-display);
+  font-size: var(--t-title);
+  font-weight: 300;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+
+.land-confirm__panel p:not(.eyebrow):not(.land-confirm__hint) {
+  color: var(--ink-2);
+  font-size: var(--t-small);
+  line-height: 1.5;
+}
+
+.land-confirm__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-4);
+}
+
+.land-confirm__actions .cta {
+  padding: 11px var(--s-4);
+  font-size: var(--t-small);
+}
+
+.land-confirm__actions .cta:disabled {
+  filter: none;
+  opacity: 0.6;
+  cursor: default;
+}
+
+.land-confirm__hint {
+  color: var(--ink-3);
+  font-family: var(--font-data);
+  font-size: var(--t-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.swap-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 41;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 7, 13, 0.86);
+}
+
+.swap-loading .eyebrow {
+  color: var(--ink);
+}

@@ -47,7 +47,14 @@ await page.waitForTimeout(1500);
 await page.evaluate(() => document.querySelector('#take-off').click());
 await page.waitForSelector('.loading', { state: 'detached', timeout: 300000 });
 await page.evaluate(() => document.querySelector('#tour-skip')?.click());
-if (await page.evaluate(() => Boolean(window.__test))) await page.evaluate(() => window.__test.arrive());
+if (await page.evaluate(() => Boolean(window.__test))) {
+  // turn 45°: if the base does not overscan, rotating the map leaves the panel corners bare
+  await page.evaluate(() => {
+    const t = window.__test;
+    t.arrive();
+    t.flight.yaw = t.flight.aimYaw = Math.PI / 4;
+  });
+}
 
 // wait for tiles to stream in: the panel should hold a varied image, not one flat colour
 await page.waitForFunction(

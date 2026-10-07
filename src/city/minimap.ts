@@ -75,10 +75,11 @@ export function drawMinimap(
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(base, BOUNDS.x0 - x, BOUNDS.z0 - z, BOUNDS.x1 - BOUNDS.x0, BOUNDS.z1 - BOUNDS.z0);
   ctx.restore();
-  drawMinimapOverlay(ctx, size, x, z, heading, landmarks, positions, visited);
+  drawMinimapOverlay(ctx, size, k, x, z, heading, landmarks, positions, visited);
 }
 
-/** The real-tiles base: a live top-down render, already centred on the flyer and north up. */
+/** Draws the live top-down render the same way, but its image is only ±RANGE wide, so it is drawn to the
+ *  panel's circumscribed circle (overscan) — otherwise turning the map would leave the corners bare. */
 export function drawMinimapTile(
   ctx: CanvasRenderingContext2D,
   size: number,
@@ -91,21 +92,24 @@ export function drawMinimapTile(
   visited: Set<string>,
 ) {
   const c = size / 2;
+  const over = c * Math.SQRT2 * 1.05;
+  const k = over / MINIMAP_RANGE;
   ctx.fillStyle = `rgb(${WATER.join(',')})`;
   ctx.fillRect(0, 0, size, size);
   ctx.save();
   ctx.translate(c, c);
   ctx.rotate(-heading);
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(image, -c, -c, size, size);
+  ctx.drawImage(image, -over, -over, over * 2, over * 2);
   ctx.restore();
-  drawMinimapOverlay(ctx, size, x, z, heading, landmarks, positions, visited);
+  drawMinimapOverlay(ctx, size, k, x, z, heading, landmarks, positions, visited);
 }
 
 /** Landmarks (diamonds, pinned to the rim when out of range), the north marker and the flyer. */
 export function drawMinimapOverlay(
   ctx: CanvasRenderingContext2D,
   size: number,
+  scale: number,
   x: number,
   z: number,
   heading: number,
@@ -114,7 +118,6 @@ export function drawMinimapOverlay(
   visited: Set<string>,
 ) {
   const c = size / 2;
-  const k = c / MINIMAP_RANGE;
   const cos = Math.cos(heading),
     sin = Math.sin(heading);
 
@@ -123,8 +126,8 @@ export function drawMinimapOverlay(
     const lm = landmarks[i];
     const dx = positions[i][0] - x,
       dz = positions[i][2] - z;
-    let px = (dx * cos + dz * sin) * k;
-    let py = (-dx * sin + dz * cos) * k;
+    let px = (dx * cos + dz * sin) * scale;
+    let py = (-dx * sin + dz * cos) * scale;
     const m = Math.max(Math.abs(px), Math.abs(py));
     if (m > edge) {
       px *= edge / m;

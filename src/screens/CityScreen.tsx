@@ -5,7 +5,7 @@ import { loadAvatar } from '../avatars/loadAvatar';
 import { SEAT, buildBike, buildParked, spotsNear, type Spot } from '../city/bike';
 import { buildCity, type City } from '../city/buildCity';
 import { Ground } from '../city/ground';
-import { GROUND_Y, REAL, place } from '../city/geo';
+import { GROUND_Y, REAL, getWorld, place, setWorld as setGeoWorld, unplace, type World } from '../city/geo';
 import { FLIGHT_KEYS, Flight } from '../city/flight';
 import { START, getBuildings, landSdf, type Collider } from '../city/layout';
 import { MINIMAP_RANGE, MINIMAP_WATER_HEX, drawMinimap, makeMinimapBase, drawMinimapTile } from '../city/minimap';
@@ -15,6 +15,7 @@ import { Console } from '../console/Console';
 import { NO_OVERLAY, type Anchor, type InspectCam, type SceneOverlay, type SnapJob } from '../console/engine';
 import { Effects } from '../components/Effects';
 import { AtmosphereSky } from '../components/AtmosphereSky';
+import { LandConfirm } from '../components/LandConfirm';
 import type { Avatar } from '../data/avatars';
 import type { Country } from '../data/countries';
 import { LANDMARKS } from '../data/landmarks';
@@ -27,16 +28,10 @@ import { LoadingScreen } from './LoadingScreen';
 
 /** Opening shot: east of the hotel towers, looking over the sky deck toward the bay and the sunset. */
 const INTRO_CAM = new THREE.Vector3(...place([980, 330, 60]));
-/** Landmark marker positions, in whichever city is on screen. */
-const LM_POS = LANDMARKS.map((l) => place(l.pos));
-/** Real tiles sit on the ellipsoid, a little below sea level: camera heights are lifted to match. */
-const LIFT = REAL ? GROUND_Y : 0;
 const INTRO_SECONDS = 3.4;
 const DEG_PX = 4; // compass tape: pixels per degree
 const TAG_STEM = 12; // console tags: length of the leader line, matches .tag3d in app.css
 const MAP_PX = 168;
-/** Real tiles have no pre-drawn map: render the loaded tiles top-down for the minimap instead. */
-const MINIMAP_3D = REAL || Boolean(import.meta.env.VITE_MINIMAP_3D);
 const MINIMAP3D_SIZE = 256;
 const FOV = 58;
 /** City map camera: how far above the horizon it looks from, tilted and straight down (a hair off vertical so "up" stays north). */
@@ -86,6 +81,9 @@ export interface Travel {
 const HIP = 1.03;
 /** Parked bikes are drawn, and landing is offered, below this height. */
 const LOW = 220;
+/** Flyer frame per world: the real tiles are far wider than the stand-in, and their surface is streamed. */
+const REAL_FRAME = { centre: new THREE.Vector2(7000, -4000), radius: 16000 };
+const SIMPLE_FRAME = { centre: new THREE.Vector2(1500, -400), radius: 6500 };
 
 interface SceneProps {
   avatar: Avatar;
@@ -95,8 +93,18 @@ interface SceneProps {
   /** Set while a landmark console is open: the camera leaves the flyer and goes where the console points it. */
   cam: React.RefObject<InspectCam | null>;
   /** Console tags pinned to places in the city. */
-  /** Builds the city: the generated stand-in, or the real tiles when a key is configured. */
-  makeCity: () => City;
+  /** The city on screen right now. */
+  city: City;
+  /** Which city that is: the real tiles or the generated stand-in. */
+  world: World;
+  /** The minimap draws the real tiles top-down rather than the drawn base chart. */
+  minimap3D: boolean;
+  /** Leave the air for the simplified city. The screen builds it if needed and swaps the world. */
+  onLand: () => void;
+  /** Return to the real tiles. */
+  onTakeoff: () => void;
+  /** True while the landing confirm is up: flight input rests. */
+  paused: boolean;
   day: boolean;
   /** City tour camera. While it is set the flyer is hidden and the arrival waits. */
   tour: React.RefObject<InspectCam | null>;
@@ -115,33 +123,28 @@ interface SceneProps {
   onLight: () => void;
 }
 
-function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
+function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, day, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
-  const city = useMemo(makeCity, [makeCity]);
+  // one flyer for the whole visit; its world (colliders, terrain, frame) is rebound when the city swaps
   const flight = useMemo(() => {
     const f = new Flight(avatar, city.colliders);
     f.pos.set(...place(START.pos));
-    if (REAL) {
-      // the real city is far wider than the stand-in: the airport alone is 16 km from the bay
-      f.centre.set(7000, -4000);
-      f.radius = 16000;
-      f.terrain = city.surfaceBelow ?? null;
-    }
     return f;
-  }, [avatar, city]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the frame is set by the world effect below
+  }, [avatar]);
   useEffect(() => city.attach?.(camera, gl), [city, camera, gl]);
-  // the pilot can leave the air: on foot and on the motorbikes parked along the streets (generated city only)
-  const canGround = avatar.ground === true && !REAL;
-  const ground = useMemo(() => {
-    const g = new Ground(city.colliders, flight.keys, flight.centre, flight.radius);
-    if (city.obstacles) g.obstacles = city.obstacles; // the traffic around the pilot, kept up to date by the city
-    return g;
-  }, [city, flight]);
+  const canGround = avatar.ground === true;
+  // one walker for the whole visit; its world is rebound on a swap
+  const ground = useMemo(() => new Ground(city.colliders, flight.keys, flight.centre, flight.radius), [flight]);
   /** The pilot as the street sees him: people step out of his way. */
   const actor = useMemo(() => ({ x: 0, y: 0, z: 0, vx: 0, vz: 0, urge: 0 }), []);
-  const bikes = useMemo(() => (canGround ? { parked: buildParked(), own: buildBike(), props: new THREE.Group() } : null), [canGround]);
+  // the parked motorbikes belong to the generated city; hide them (and this whole path) over the real tiles
+  const bikes = useMemo(
+    () => (canGround && world === 'simple' ? { parked: buildParked(), own: buildBike(), props: new THREE.Group() } : null),
+    [canGround, world],
+  );
   const travel = useRef({
     mode: 'fly' as TravelMode,
     now: 0,
@@ -160,6 +163,47 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     if (!bikes) return;
     bikes.props.add(bikes.parked.group);
   }, [bikes]);
+  // On a world change: rebind the pilot to the new city's colliders/frame, and move him between the
+  // two coordinate systems. A real position -> simplified uses unplace(); the return uses place().
+  const firstWorld = useRef(true);
+  useEffect(() => {
+    if (world === 'real') {
+      flight.setFrame(city.colliders, city.surfaceBelow ?? null, REAL_FRAME.centre, REAL_FRAME.radius);
+      ground.setFrame(city.colliders, city.obstacles, REAL_FRAME.centre, REAL_FRAME.radius);
+    } else {
+      flight.setFrame(city.colliders, null, SIMPLE_FRAME.centre, SIMPLE_FRAME.radius);
+      ground.setFrame(city.colliders, city.obstacles, SIMPLE_FRAME.centre, SIMPLE_FRAME.radius);
+    }
+    if (firstWorld.current) {
+      firstWorld.current = false;
+      return;
+    }
+    const tr = travel.current;
+    if (world === 'simple') {
+      // AtmosphereSky pushes the exposure up for the real sky; the stand-in bloom path wants the default
+      gl.toneMappingExposure = 1;
+      const at = unplace([flight.pos.x, flight.pos.y, flight.pos.z]);
+      const off = Math.hypot(at[0] - SIMPLE_FRAME.centre.x, at[2] - SIMPLE_FRAME.centre.y);
+      if (landSdf(at[0], at[2]) > 2 || off > SIMPLE_FRAME.radius) {
+        // landed over water or off the generated map: drop him at the start instead
+        at[0] = START.pos[0];
+        at[1] = 0;
+        at[2] = START.pos[2];
+      }
+      ground.arrive(new THREE.Vector3(at[0], Math.max(0, at[1]), at[2]), flight.aimYaw);
+      tr.mode = 'walk';
+    } else {
+      const at = place([ground.pos.x, ground.pos.y, ground.pos.z]);
+      flight.pos.set(at[0], at[1] + HIP, at[2]);
+      flight.vel.set(0, 7, 0);
+      flight.yaw = flight.aimYaw = ground.aimYaw;
+      flight.pitch = 0;
+      flight.aimPitch = 0.12;
+      tr.mode = 'fly';
+    }
+    tr.stale = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- city is the new active city at this point
+  }, [world]);
   // yaw -> bank -> lean, so a roll is always around the direction of travel
   const rig = useMemo(() => {
     const yaw = new THREE.Group(), bank = new THREE.Group(), lean = new THREE.Group();
@@ -167,9 +211,9 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     bank.add(lean);
     return { yaw, bank, lean };
   }, []);
-  const mapBase = useMemo(() => (MINIMAP_3D ? null : makeMinimapBase()), []);
+  const mapBase = useMemo(() => (minimap3D ? null : makeMinimapBase()), [minimap3D]);
   // the real minimap is a small top-down render of the tiles: a camera, a target and a readback canvas
-  const minimap3d = useMemo(() => (MINIMAP_3D ? makeMinimap3D(MINIMAP3D_SIZE) : null), []);
+  const minimap3d = useMemo(() => (minimap3D ? makeMinimap3D(MINIMAP3D_SIZE) : null), [minimap3D]);
   useEffect(() => () => minimap3d?.dispose(), [minimap3d]);
   useEffect(() => {
     if (minimap3d) city.registerMapCamera?.(minimap3d.camera, MINIMAP3D_SIZE);
@@ -196,7 +240,8 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     pitch: 0,
     fov: FOV,
   });
-  const overlays = useMemo(buildOverlays, []);
+  // the map/console drawings bake place() into their geometry, so they follow the active world
+  const overlays = useMemo(buildOverlays, [world]);
   // stills: a small off-screen target, a spare camera, and the equipment model's own scene
   const snap = useMemo(() => {
     const W = 384, H = 216;
@@ -234,6 +279,9 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     }),
     [],
   );
+  /** Landmark positions in the active city; camera heights lifted to match the real tiles. */
+  const lmPos = useMemo(() => LANDMARKS.map((l) => place(l.pos)), [world]);
+  const lift = world === 'real' ? GROUND_Y : 0;
 
   useEffect(() => {
     flightRef.current = flight;
@@ -258,12 +306,18 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
         if (!canGround) return;
         if (tr.mode === 'fly') {
           if (!tr.canLand) return;
+          if (REAL && world === 'real') return onLand();
           ground.arrive(flight.pos, flight.aimYaw);
           tr.mode = 'walk';
         } else {
           if (tr.mode === 'ride') {
             tr.left = { x: ground.pos.x, z: ground.pos.z, yaw: ground.yaw };
             parkOwn();
+          }
+          if (REAL && world === 'simple') {
+            // carry the heading into the flyer; the world effect moves the position and takes off
+            flight.aimYaw = ground.aimYaw;
+            return onTakeoff();
           }
           flight.pos.copy(ground.pos);
           flight.pos.y += HIP;
@@ -304,7 +358,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     return () => {
       travelRef.current = null;
     };
-  }, [flight, ground, bikes, canGround, rig, travelRef]);
+  }, [flight, ground, bikes, canGround, rig, travelRef, onLand, onTakeoff, world]);
 
   // test builds only (VITE_TEST=1): the software renderer runs far below real time, so the test script moves the
   // simulation itself. Compiled out of every other build.
@@ -320,6 +374,8 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       camera,
       frames: () => frames.current,
       arrive: () => (intro.current = 1),
+      world: () => getWorld(),
+      toggle: () => travelRef.current?.toggleGround(),
       sim(seconds: number, step = 1 / 60) {
         for (let s = 0; s < seconds; s += step) (travel.current.mode === 'fly' ? flight : ground).update(step, true);
       },
@@ -331,16 +387,21 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
   useEffect(() => {
     env.current = { pmrem: new THREE.PMREMGenerator(gl), target: null, version: -1 };
     scene.environmentIntensity = 1;
-    scene.fog = city.fog;
     return () => {
       scene.environment = null;
       scene.fog = null;
       env.current?.target?.dispose();
       env.current?.pmrem.dispose();
       env.current = null;
-      city.dispose();
     };
-  }, [gl, scene, city]);
+  }, [gl, scene]);
+  useEffect(() => {
+    scene.fog = city.fog;
+  }, [scene, city]);
+  // a world change means a different sky: bake the simplified city's environment again
+  useEffect(() => {
+    if (env.current) env.current.version = -1;
+  }, [world]);
   const firstLight = useRef(true);
   useEffect(() => {
     city.setDay(day, firstLight.current);
@@ -375,7 +436,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
       if (e0.version >= 0) onLight();
       e0.version = city.lightVersion;
       // real mode: AtmosphereSky owns scene.environment (the real sky), so skip the stand-in bake
-      if (!REAL) {
+      if (world === 'simple') {
         e0.target?.dispose();
         e0.target = e0.pmrem.fromScene(city.envScene, 0, 1, 1000);
         scene.environment = e0.target.texture;
@@ -389,7 +450,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
 
     const tr = travel.current;
     tr.now = t;
-    const controls = live.current === true && intro.current > 0.7 && !want;
+    const controls = live.current === true && intro.current > 0.7 && !want && !paused;
     if (tr.mode === 'fly') flight.update(dt, controls);
     else ground.update(dt, controls);
     /** Whoever is carrying the visitor right now: position, view direction and speed for the camera and the HUD. */
@@ -502,7 +563,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     } else if (want) {
       o.fixed = false;
       v.q.set(...place(want.target));
-      const wantH = want.height + LIFT;
+      const wantH = want.height + lift;
       if (want.cut !== undefined && want.cut !== o.cut) {
         // a new shot: jump there, no glide across the city
         o.cut = want.cut;
@@ -672,9 +733,19 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     if (h.tape) h.tape.style.transform = `translateX(${(-(who.heading + 180) * DEG_PX).toFixed(1)}px)`;
     if (h.boost) h.boost.style.transform = `scaleX(${Math.min(1, who.boost).toFixed(3)})`;
 
-    // motorbikes: the ones parked around this block, which one is in reach, and whether there is ground to land on
+    // whether landing is offered: low over open ground. The real tiles have no stand-in shore test, so
+    // ask the streamed surface instead; over water or a gap it reports no hit and landing is not offered.
+    const low = who.pos.y < LOW;
+    if ((frames.current % 6 === 0 || tr.stale) && tr.mode === 'fly') {
+      tr.canLand =
+        low &&
+        (world === 'real'
+          ? (city.surfaceBelow?.(flight.pos.x, flight.pos.y, flight.pos.z) ?? 0) > 0
+          : landSdf(flight.pos.x, flight.pos.z) > 2);
+    }
+
+    // motorbikes: the ones parked around this block and which one is in reach (generated city only)
     if (bikes) {
-      const low = who.pos.y < LOW;
       if (frames.current % 6 === 0 || tr.stale) {
         const block = low ? `${Math.round(who.pos.x / 40)},${Math.round(who.pos.z / 40)}` : 'high';
         if (block !== tr.block || tr.stale) {
@@ -695,14 +766,13 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
           }
           if (tr.left && Math.hypot(tr.left.x - ground.pos.x, tr.left.z - ground.pos.z) < best && ground.pos.y < 1) tr.near = { ...tr.left, spot: null };
         }
-        tr.canLand = tr.mode === 'fly' && low && landSdf(flight.pos.x, flight.pos.z) > 2;
       }
       bikes.parked.update(t);
-      const tell = `${tr.mode}|${tr.near ? 1 : 0}|${tr.canLand ? 1 : 0}`;
-      if (tell !== tr.told) {
-        tr.told = tell;
-        onTravel({ mode: tr.mode, nearBike: tr.near !== null, canLand: tr.canLand });
-      }
+    }
+    const tell = `${tr.mode}|${tr.near ? 1 : 0}|${tr.canLand ? 1 : 0}`;
+    if (tell !== tr.told) {
+      tr.told = tell;
+      onTravel({ mode: tr.mode, nearBike: tr.near !== null, canLand: tr.canLand });
     }
 
     // landmark markers: projected to the screen, pinned to the edge when out of view
@@ -710,7 +780,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
     let near: string | null = null;
     let nearDist = Infinity;
     LANDMARKS.forEach((lm, i) => {
-      const at = LM_POS[i];
+      const at = lmPos[i];
       v.p.set(...at);
       const dist = v.p.distanceTo(who.pos);
       const flat = Math.hypot(at[0] - who.pos.x, at[2] - who.pos.z);
@@ -767,12 +837,12 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
         if (minimap3d) {
           try {
             const tile = minimap3d.render(gl, city.group, who.pos.x, who.pos.z, MINIMAP_RANGE, MINIMAP_WATER_HEX);
-            drawMinimapTile(ctx, MAP_PX, tile, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, LM_POS, here);
+            drawMinimapTile(ctx, MAP_PX, tile, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, lmPos, here);
           } catch {
             // a lost tile or a readback failure: keep the last frame rather than break the loop
           }
         } else if (mapBase) {
-          drawMinimap(ctx, MAP_PX, mapBase, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, LM_POS, here);
+          drawMinimap(ctx, MAP_PX, mapBase, who.pos.x, who.pos.z, who.aimYaw, LANDMARKS, lmPos, here);
         }
       }
     }
@@ -790,7 +860,7 @@ function CityScene({ makeCity, avatar, day, hud, live, cam, tour, anchors, overl
   return (
     <>
       {/* real mode: atmosphere sky + its own composer. stand-in: the bloom pass below. */}
-      {REAL ? (
+      {world === 'real' ? (
         <AtmosphereSky />
       ) : (
         /* dusk: facades and ground stay under 1; lit windows, lamps and the sun cross it and glow.
@@ -889,16 +959,75 @@ interface Props {
   onGlobe: () => void;
   /** Tells the shell what the visitor is doing, so the control hint can follow. */
   onMode: (mode: CityMode) => void;
+  /** Tells the shell which world is active, so the day/dusk switch can follow it. */
+  onWorld: (world: World) => void;
 }
 
 export type CityMode = 'fly' | 'tour' | 'console' | 'map';
 
-export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMode }: Props) {
-  // the real-tiles code is only fetched when a Cesium ion token is configured; the stand-in city is always at hand
-  const [makeCity, setMakeCity] = useState<(() => City) | null>(() => (REAL ? null : buildCity));
+export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMode, onWorld }: Props) {
+  // Both cities are built once and kept alive, so a swap never re-streams the tiles. The generated
+  // city is built eagerly without a token, and lazily on the first landing otherwise (see later tasks).
+  const [realCity, setRealCity] = useState<City | null>(null);
+  const [simpleCity, setSimpleCity] = useState<City | null>(() => (REAL ? null : buildCity()));
+  const [world, setWorldState] = useState<World>(() => (REAL ? 'real' : 'simple'));
   useEffect(() => {
-    if (REAL) import('../city/realCity').then((m) => setMakeCity(() => m.buildRealCity));
+    if (!REAL) return;
+    import('../city/realCity').then((m) => setRealCity(m.buildRealCity()));
   }, []);
+  const city = world === 'simple' ? simpleCity : realCity;
+  // the real tiles have no pre-drawn map: render their own tiles top-down; the stand-in uses the base chart
+  const minimap3D = world === 'real' || Boolean(import.meta.env.VITE_MINIMAP_3D);
+  // dispose both on unmount; CityScene no longer owns disposal
+  const owned = useRef<City[]>([]);
+  useEffect(() => {
+    if (realCity && !owned.current.includes(realCity)) owned.current.push(realCity);
+    if (simpleCity && !owned.current.includes(simpleCity)) owned.current.push(simpleCity);
+  }, [realCity, simpleCity]);
+  useEffect(
+    () => () => {
+      for (const c of owned.current) c.dispose();
+      owned.current.length = 0;
+    },
+    [],
+  );
+  const simpleRef = useRef<City | null>(null);
+  /** Build the generated city on first use; later landings reuse it. */
+  const ensureSimple = (): City => {
+    if (simpleRef.current) return simpleRef.current;
+    const c = buildCity();
+    simpleRef.current = c;
+    setSimpleCity(c);
+    return c;
+  };
+  const [confirmLand, setConfirmLand] = useState(false);
+  const [swapLoading, setSwapLoading] = useState(false);
+  const land = () => setConfirmLand(true);
+  const takeoff = () => {
+    setGeoWorld('real');
+    setWorldState('real');
+  };
+  /** Confirmed: build the simplified city if needed, then swap. The overlay paints before the build. */
+  const confirmLanding = () => {
+    if (swapLoading) return;
+    setSwapLoading(true);
+    requestAnimationFrame(() => {
+      ensureSimple();
+      setGeoWorld('simple');
+      setWorldState('simple');
+      setSwapLoading(false);
+      setConfirmLand(false);
+    });
+  };
+  const cancelLanding = () => {
+    setConfirmLand(false);
+    setSwapLoading(false);
+  };
+  useEffect(() => {
+    if (!confirmLand) return;
+    flightRef.current?.keys.clear();
+    if (document.pointerLockElement) document.exitPointerLock();
+  }, [confirmLand]);
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
@@ -914,7 +1043,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
   const travelRef = useRef<Travel | null>(null);
   const [travel, setTravel] = useState<TravelState>({ mode: 'fly', nearBike: false, canLand: false });
   const audio = useRef<AudioContext | null>(null);
-  const canGround = avatar.ground === true && !REAL;
+  const canGround = avatar.ground === true;
   const hud = useRef<Hud>({ speed: null, alt: null, hdg: null, tape: null, boost: null, credits: null, map: null, markers: [], dists: [], ticks: [], rows: 1 });
   const live = useRef(false);
   live.current = !loading;
@@ -932,6 +1061,9 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
     onMode(mode);
     return () => onMode('fly');
   }, [mode, onMode]);
+  useEffect(() => {
+    onWorld(world);
+  }, [world, onWorld]);
   const near = LANDMARKS.find((l) => l.id === nearId) ?? null;
   const cam = useRef<InspectCam | null>(null);
   const anchors = useRef(new Map<string, Anchor>());
@@ -1178,14 +1310,14 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
   hud.current.rows = Math.min(2, prompts.length);
 
   return (
-    <main className={`main main--city${REAL ? ' main--real' : ''}${mapId ? ' is-map' : ''}`}>
+    <main className={`main main--city${world === 'real' ? ' main--real' : ''}${mapId ? ' is-map' : ''}`}>
       <div className="city-view" ref={viewRef}>
         <Canvas
           dpr={[1, 1.25]}
           gl={{ antialias: false, alpha: false, powerPreference: 'high-performance', depth: !REAL }}
           camera={{ fov: 58, near: 1, far: 42000, position: INTRO_CAM.toArray() }}
         >
-          {makeCity && <CityScene makeCity={makeCity} avatar={avatar} day={day} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
+          {city && <CityScene city={city} world={world} minimap3D={minimap3D} onLand={land} onTakeoff={takeoff} paused={confirmLand} avatar={avatar} day={day} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
         </Canvas>
       </div>
 
@@ -1221,7 +1353,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
               </dd>
               <dt>Landmarks visited</dt>
             </div>
-            {REAL ? (
+            {world === 'real' ? (
               <div className="stat">
                 <dd>3D Tiles</dd>
                 <dt>Photorealistic, by Google</dt>
@@ -1322,9 +1454,17 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
         <CityToolbar mapId={mapId} flat={flat} onMenu={openMap} onFlat={toggleFlat} onZoom={zoomMap} onFly={closeMap} onStats={startTour} onFlyer={onChangeFlyer} onGlobe={onGlobe} />
       )}
 
+      {confirmLand && <LandConfirm onConfirm={confirmLanding} onCancel={cancelLanding} loading={swapLoading} />}
+
+      {swapLoading && (
+        <div className="swap-loading" role="status">
+          <span className="eyebrow">Loading simplified city…</span>
+        </div>
+      )}
+
       {open && <Console key={open.id} landmark={open} shots={shots[open.id] ?? {}} assetShot={assetShot} cam={cam} overlay={overlay} anchors={anchors} onClose={() => setOpenId(null)} />}
 
-      {REAL && <p className="credits" ref={(el) => void (hud.current.credits = el)} />}
+      {world === 'real' && <p className="credits" ref={(el) => void (hud.current.credits = el)} />}
 
       {touring && <CityTour country={country} cam={tourCam} paused={loading} onDone={() => setTouring(false)} />}
 
