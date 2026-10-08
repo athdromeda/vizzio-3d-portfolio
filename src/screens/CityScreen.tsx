@@ -60,6 +60,7 @@ interface Hud {
 }
 
 export type TravelMode = 'fly' | 'walk' | 'ride';
+type TakeoffPhase = 'capture' | 'loading' | 'timeout' | 'leaving';
 /** What the HUD needs to know about how the visitor is getting around. */
 export interface TravelState {
   mode: TravelMode;
@@ -104,6 +105,11 @@ interface SceneProps {
   onLand: () => void;
   /** Return to the real tiles. */
   onTakeoff: () => void;
+  /** Holds the generated view while the real renderer becomes usable. */
+  takeoffPhase: TakeoffPhase | null;
+  takeoffCanvas: React.RefObject<HTMLCanvasElement | null>;
+  onTakeoffCaptured: () => void;
+  onTakeoffReady: () => void;
   /** True while the landing confirm is up: flight input rests. */
   paused: boolean;
   timeOfDay: TimeOfDay;
@@ -124,7 +130,7 @@ interface SceneProps {
   onLight: () => void;
 }
 
-function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, timeOfDay, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
+function CityScene({ city, world, minimap3D, onLand, onTakeoff, takeoffPhase, takeoffCanvas, onTakeoffCaptured, onTakeoffReady, paused, avatar, timeOfDay, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
@@ -136,7 +142,9 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the frame is set by the world effect below
   }, [avatar]);
   useEffect(() => city.attach?.(camera, gl), [city, camera, gl]);
-  const canGround = avatar.ground === true;
+  // Ground mode (land / walk / ride) is hidden at the client's request. Restore by uncommenting the line below.
+  // const canGround = avatar.ground === true;
+  const canGround = false;
   // one walker for the whole visit; its world is rebound on a swap
   const ground = useMemo(() => new Ground(city.colliders, flight.keys, flight.centre, flight.radius), [flight]);
   /** The pilot as the street sees him: people step out of his way. */
@@ -220,6 +228,17 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     bank.add(lean);
     return { yaw, bank, lean };
   }, []);
+  const avatarFill = useMemo(() => {
+    const light = new THREE.PointLight(0x9dbbff, 0.25, 16, 2);
+    light.position.set(1.5, 2.2, 2.5);
+    return light;
+  }, []);
+  useEffect(() => {
+    rig.lean.add(avatarFill);
+    return () => {
+      rig.lean.remove(avatarFill);
+    };
+  }, [rig, avatarFill]);
   const mapBase = useMemo(() => (minimap3D ? null : makeMinimapBase()), [minimap3D]);
   // the real minimap is a small top-down render of the tiles: a camera, a target and a readback canvas
   const minimap3d = useMemo(() => (minimap3D ? makeMinimap3D(MINIMAP3D_SIZE) : null), [minimap3D]);
@@ -234,6 +253,7 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     model.current?.userData.setWorldProfile?.(world === 'real' ? 'real' : 'simple');
   }, [world]);
   const frames = useRef(0);
+  const takeoff = useRef({ captured: false, stable: 0, sky: new Uint8Array(0) });
   const intro = useRef(0);
   const shown = useRef({ speed: -1, alt: -1, hdg: -1, near: null as string | null, dist: LANDMARKS.map(() => ''), spots: LANDMARKS.map(() => [0, 0]) });
   const fps = useRef({ frames: 0, since: 0 });
@@ -442,6 +462,11 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     };
   }, [avatar, rig]);
 
+  useEffect(() => {
+    if (takeoffPhase === 'capture') takeoff.current.captured = false;
+    if (takeoffPhase !== 'loading') takeoff.current.stable = 0;
+  }, [takeoffPhase]);
+
   useFrame((state, rawDt) => {
     const dt = Math.min(rawDt, 0.05);
     const t = state.clock.elapsedTime;
@@ -471,6 +496,7 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     /** Whoever is carrying the visitor right now: position, view direction and speed for the camera and the HUD. */
     const who = tr.mode === 'fly' ? flight : ground;
     const obj = model.current;
+    avatarFill.intensity = timeOfDay === 'night' ? 5 : timeOfDay === 'dusk' ? 2.5 : 0.25;
     const stance = obj?.userData.setStance as ((s: { mode: 'fly' | 'walk' | 'air' | 'ride'; phase?: number; amount?: number }, flames: boolean) => void) | undefined;
 
     if (tr.mode === 'fly') {
@@ -753,6 +779,7 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     const low = who.pos.y < LOW;
     if ((frames.current % 6 === 0 || tr.stale) && tr.mode === 'fly') {
       tr.canLand =
+        canGround &&
         low &&
         (world === 'real'
           ? (city.surfaceBelow?.(flight.pos.x, flight.pos.y, flight.pos.z) ?? 0) > 0
@@ -872,15 +899,50 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     }
   });
 
+  // Runs after either post-processing composer. Capture the outgoing generated frame, then only
+  // reveal the real scene once the atmosphere has drawn: a cleared, still-warming frame is pure black.
+  useFrame(() => {
+    const tr = takeoff.current;
+    if (takeoffPhase === 'capture' && !tr.captured) {
+      const target = takeoffCanvas.current;
+      const source = gl.domElement;
+      const ctx = target?.getContext('2d');
+      if (!target || !ctx || source.width === 0 || source.height === 0) return;
+      target.width = source.width;
+      target.height = source.height;
+      ctx.drawImage(source, 0, 0);
+      tr.captured = true;
+      onTakeoffCaptured();
+      return;
+    }
+    if (takeoffPhase !== 'loading' || world !== 'real') return;
+
+    // Read the presented frame; the composer may leave a target bound, so bind the screen first.
+    gl.setRenderTarget(null);
+    const context = gl.getContext();
+    const w = gl.domElement.width, h = gl.domElement.height;
+    if (w < 4 || h < 4) return;
+    if (tr.sky.length !== w * 4) tr.sky = new Uint8Array(w * 4);
+    // Two rows from the top of the frame. While the atmosphere warms they are cleared black;
+    // once it draws, even a night sky is off zero. Geometry detail does not matter here.
+    let bright = 0;
+    for (const y of [Math.floor(h * 0.85), Math.floor(h * 0.95)]) {
+      context.readPixels(0, y, w, 1, context.RGBA, context.UNSIGNED_BYTE, tr.sky);
+      for (let i = 0; i < tr.sky.length; i += 4) {
+        if (tr.sky[i] + tr.sky[i + 1] + tr.sky[i + 2] > 4) bright++;
+      }
+    }
+    tr.stable = bright >= 2 ? tr.stable + 1 : 0;
+    if (tr.stable === 2) onTakeoffReady();
+  }, 2);
+
   return (
     <>
-      {/* real mode: atmosphere sky + its own composer. stand-in: the bloom pass below. */}
-      {world === 'real' ? (
-        <AtmosphereSky timeOfDay={timeOfDay} onTimeSettled={onLight} />
-      ) : (
-        /* At dusk and night, lit windows and lamps cross the bloom threshold. */
-        <Effects threshold={TIME_OF_DAY[timeOfDay].bloom.threshold} strength={TIME_OF_DAY[timeOfDay].bloom.strength} radius={0.45} transition={2} />
-      )}
+      {/* Real mode keeps its atmosphere mounted for the whole visit (just hidden) so taking off is
+          instant; the generated city drives the bloom pass, which sits out while real owns the frame. */}
+      {REAL && <AtmosphereSky timeOfDay={timeOfDay} visible={world === 'real'} onTimeSettled={onLight} />}
+      {/* At dusk and night, lit windows and lamps cross the bloom threshold. */}
+      <Effects enabled={world === 'simple'} threshold={TIME_OF_DAY[timeOfDay].bloom.threshold} strength={TIME_OF_DAY[timeOfDay].bloom.strength} radius={0.45} transition={2} />
       <primitive object={city.group} />
       <primitive object={rig.yaw} />
       {bikes && <primitive object={bikes.props} />}
@@ -981,11 +1043,13 @@ interface Props {
   onGlobe: () => void;
   /** Tells the shell what the visitor is doing, so the control hint can follow. */
   onMode: (mode: CityMode) => void;
+  /** Tells the shell which city is on screen, so the time selector can match it. */
+  onWorld: (world: World) => void;
 }
 
 export type CityMode = 'fly' | 'tour' | 'console' | 'map';
 
-export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe, onMode }: Props) {
+export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe, onMode, onWorld }: Props) {
   // Both cities are built once and kept alive, so a swap never re-streams the tiles. The generated
   // city is built eagerly without a token, and lazily on the first landing otherwise (see later tasks).
   const [realCity, setRealCity] = useState<City | null>(null);
@@ -1022,11 +1086,32 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
   };
   const [confirmLand, setConfirmLand] = useState(false);
   const [swapLoading, setSwapLoading] = useState(false);
+  const [takeoffPhase, setTakeoffPhase] = useState<TakeoffPhase | null>(null);
+  const takeoffCanvas = useRef<HTMLCanvasElement>(null);
   const land = () => setConfirmLand(true);
   const takeoff = () => {
+    flightRef.current?.keys.clear();
+    setTakeoffPhase('capture');
+  };
+  const takeoffCaptured = () => {
     setGeoWorld('real');
     setWorldState('real');
+    setTakeoffPhase('loading');
   };
+  const takeoffReady = () => setTakeoffPhase('leaving');
+  const retryTakeoff = () => {
+    setTakeoffPhase('loading');
+  };
+  useEffect(() => {
+    if (takeoffPhase !== 'loading') return;
+    const timer = window.setTimeout(() => setTakeoffPhase('timeout'), 20000);
+    return () => window.clearTimeout(timer);
+  }, [takeoffPhase]);
+  useEffect(() => {
+    if (takeoffPhase !== 'leaving') return;
+    const timer = window.setTimeout(() => setTakeoffPhase(null), 240);
+    return () => window.clearTimeout(timer);
+  }, [takeoffPhase]);
   /** Confirmed: build the simplified city if needed, then swap. The overlay paints before the build. */
   const confirmLanding = () => {
     if (swapLoading) return;
@@ -1063,7 +1148,9 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
   const travelRef = useRef<Travel | null>(null);
   const [travel, setTravel] = useState<TravelState>({ mode: 'fly', nearBike: false, canLand: false });
   const audio = useRef<AudioContext | null>(null);
-  const canGround = avatar.ground === true;
+  // Ground mode (land / walk / ride) is hidden at the client's request. Restore by uncommenting the line below.
+  // const canGround = avatar.ground === true;
+  const canGround = false;
   const hud = useRef<Hud>({ speed: null, alt: null, hdg: null, tape: null, boost: null, credits: null, map: null, markers: [], dists: [], ticks: [], rows: 1 });
   const live = useRef(false);
   live.current = !loading;
@@ -1081,6 +1168,9 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
     onMode(mode);
     return () => onMode('fly');
   }, [mode, onMode]);
+  useEffect(() => {
+    onWorld(world);
+  }, [world, onWorld]);
   const near = LANDMARKS.find((l) => l.id === nearId) ?? null;
   const cam = useRef<InspectCam | null>(null);
   const anchors = useRef(new Map<string, Anchor>());
@@ -1095,8 +1185,8 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
   const buildingCount = useMemo(() => getBuildings().filter((b) => b.y0 === 0).length, []);
 
   // latest values for the key handler, which is bound once
-  const state = useRef({ nearId, openId, touring, mapId });
-  state.current = { nearId, openId, touring, mapId };
+  const state = useRef({ nearId, openId, touring, mapId, takeoffPhase });
+  state.current = { nearId, openId, touring, mapId, takeoffPhase };
 
   /** Point the scene camera at the map view. North is up: the camera stands south of its target. */
   const aimMap = () => {
@@ -1230,6 +1320,7 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
       if (state.current.touring) return; // the tour has its own keys
       const s = state.current;
       const typing = Boolean((e.target as HTMLElement | null)?.closest?.('input, textarea'));
+      if (down && s.takeoffPhase) return;
       if (down && !e.repeat && live.current && !s.openId && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
         // the city map: a number opens a menu, M opens the last one or closes the map
         const n = MENU_KEYS.indexOf(e.code);
@@ -1243,10 +1334,11 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
         return;
       }
       if (down && !e.repeat && live.current && !s.openId && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        // leaving the air: G lands or takes off, F gets on or off a motorbike, H is the horn
-        if (e.code === 'KeyG') return travelRef.current?.toggleGround();
-        if (e.code === 'KeyF') return travelRef.current?.toggleBike();
-        if (e.code === 'KeyH') return actions.current.honk();
+        // leaving the air: G lands or takes off, F gets on or off a motorbike, H is the horn.
+        // Hidden at the client's request. Restore by uncommenting the three lines below.
+        // if (e.code === 'KeyG') return travelRef.current?.toggleGround();
+        // if (e.code === 'KeyF') return travelRef.current?.toggleBike();
+        // if (e.code === 'KeyH') return actions.current.honk();
       }
       if (!FLIGHT_KEYS.has(e.code)) return;
       // Space on a focused button should press the button, not climb
@@ -1319,7 +1411,7 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
   const prompts: string[] = [];
   if (!open) {
     if (travel.mode === 'walk' && travel.nearBike) prompts.push('F · Ride this motorbike');
-    if (travel.mode === 'fly' && travel.canLand) prompts.push('G · Land on the street');
+    if (canGround && travel.mode === 'fly' && travel.canLand) prompts.push('G · Land on the street');
     if (near) prompts.push(`E · Open ${near.name}`);
     if (!locked) prompts.push(touched ? 'Click the view to steer' : 'Click the view to take control');
   }
@@ -1334,7 +1426,7 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
           gl={{ antialias: false, alpha: false, powerPreference: 'high-performance', depth: !REAL }}
           camera={{ fov: 58, near: 1, far: 42000, position: INTRO_CAM.toArray() }}
         >
-          {city && <CityScene city={city} world={world} minimap3D={minimap3D} onLand={land} onTakeoff={takeoff} paused={confirmLand} avatar={avatar} timeOfDay={timeOfDay} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
+          {city && <CityScene city={city} world={world} minimap3D={minimap3D} onLand={land} onTakeoff={takeoff} takeoffPhase={takeoffPhase} takeoffCanvas={takeoffCanvas} onTakeoffCaptured={takeoffCaptured} onTakeoffReady={takeoffReady} paused={confirmLand || takeoffPhase !== null} avatar={avatar} timeOfDay={timeOfDay} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
         </Canvas>
       </div>
 
@@ -1476,6 +1568,22 @@ export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe,
       {swapLoading && (
         <div className="swap-loading" role="status">
           <span className="eyebrow">Loading simplified city…</span>
+        </div>
+      )}
+
+      {takeoffPhase && (
+        <div className="takeoff-transition" data-phase={takeoffPhase} role="status">
+          <canvas ref={takeoffCanvas} aria-hidden="true" />
+          <div className="takeoff-transition__status">
+            <i aria-hidden="true" />
+            <span className="eyebrow">Returning to photorealistic city...</span>
+            {takeoffPhase === 'timeout' && (
+              <div className="takeoff-transition__actions">
+                <button type="button" className="cta" onClick={retryTakeoff}>Retry</button>
+                <button type="button" className="ghost" onClick={() => setTakeoffPhase(null)}>Continue</button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

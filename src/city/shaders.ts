@@ -96,7 +96,7 @@ vec3 sunRadiance() { return mix(vec3(1.0, 0.55, 0.27) * 1.35, vec3(1.0, 0.93, 0.
 vec3 ambient(vec3 n) {
   vec3 up = mix(vec3(0.36, 0.42, 0.64) * 0.5, vec3(0.3, 0.42, 0.7) * 0.5, uDay);
   vec3 down = mix(vec3(0.1, 0.085, 0.08), vec3(0.17, 0.16, 0.14), uDay);
-  return mix(mix(down, up, n.y * 0.5 + 0.5), mix(vec3(0.008, 0.012, 0.025), vec3(0.035, 0.055, 0.11), n.y * 0.5 + 0.5), uNight);
+  return mix(mix(down, up, n.y * 0.5 + 0.5), mix(vec3(0.12, 0.17, 0.3), vec3(0.28, 0.4, 0.68), n.y * 0.5 + 0.5), uNight);
 }
 
 float heightAt(vec2 p) { return texture2D(uHeight, (p - MAPBOX.xy) * MAPBOX.zw).r * 510.0; }
@@ -354,7 +354,7 @@ export function makeGroundMaterial() {
         asphalt = mix(asphalt, carA, carBody * uDay * (1.0 - smoothstep(0.3, 0.8, fine)) * (1.0 - pool));
         landA = mix(landA, asphalt, road);
 
-        vec3 landCol = landA * (amb * ao + sunL);
+        vec3 landCol = landA * (amb * ao + sunL) * mix(1.0, 2.4, uNight);
 
         // --- dusk only: street lamps, head and tail lights, promenade lights
         vec3 lampCol = vec3(1.0, 0.6, 0.26);
@@ -627,7 +627,7 @@ export function makeBuildingMaterial(single?: { color: [number, number, number];
             float blind = step(1.0 - drawn * 0.6, wq.y) * step(0.45, drawn);
             float room = mix(1.0, mix(0.55, 1.2, wq.y) * (1.0 - 0.45 * blind), close);
 
-            vec3 wallLit = wall * (amb + sunL);
+             vec3 wallLit = wall * (amb + sunL) * mix(1.0, 2.4, uNight);
             vec3 pane = mix(glass, lightCol * bright * room, lit);
             vec3 average = mix(wallLit, mix(glass, lightCol * 0.88, (litRatio * 0.9 + 0.05) * night), cover);
             vec3 face = mix(mix(wallLit, pane, win), average, farAway);
@@ -656,7 +656,7 @@ export function makeBuildingMaterial(single?: { color: [number, number, number];
             return;
           }
         }
-        vec3 col = albedo * (amb + sunL) + emit;
+         vec3 col = albedo * (amb + sunL) * mix(1.0, 2.4, uNight) + emit;
         col = mix(col, hazeColor(-V), fogAmount(dist));
         gl_FragColor = vec4(col, 1.0);
       }`,

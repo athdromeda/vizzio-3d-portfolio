@@ -13,10 +13,12 @@ interface Props {
   radius: number;
   /** Seconds used to ease between changed settings. Omit for an immediate change. */
   transition?: number;
+  /** False while another pipeline (the real-city atmosphere) owns the frame: the pass then never renders. */
+  enabled?: boolean;
 }
 
 /** Bloom + tone mapping for a scene, with MSAA kept on. Takes over rendering from R3F. */
-export function Effects({ threshold, strength, radius, transition = 0 }: Props) {
+export function Effects({ threshold, strength, radius, transition = 0, enabled = true }: Props) {
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera);
@@ -47,6 +49,7 @@ export function Effects({ threshold, strength, radius, transition = 0 }: Props) 
   }, [composer, gl, size]);
   useEffect(() => () => composer.dispose(), [composer]);
   useFrame((_, dt) => {
+    if (!enabled) return;
     const c = change.current;
     if (c.elapsed < c.duration) {
       c.elapsed = Math.min(c.duration, c.elapsed + dt);

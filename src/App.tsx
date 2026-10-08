@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { REAL, type World } from './city/geo';
 import { TIME_OPTIONS, type TimeOfDay } from './city/timeOfDay';
 import { Shell } from './components/Shell';
 import { AVATARS } from './data/avatars';
@@ -28,9 +29,15 @@ export function App() {
   const avatar = AVATARS.find((a) => a.id === avatarId) ?? AVATARS[0];
   const [cityMode, setCityMode] = useState<CityMode>('fly');
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>('day');
+  const [world, setWorld] = useState<World>(REAL ? 'real' : 'simple');
+  // The real tiles read badly at night, so the option is offered only in the generated stand-in city.
+  const lightOptions = world === 'real' ? TIME_OPTIONS.filter((option) => option.id !== 'night') : TIME_OPTIONS;
+  useEffect(() => {
+    if (world === 'real' && timeOfDay === 'night') setTimeOfDay('dusk');
+  }, [world, timeOfDay]);
   const light = (
     <div className="seg" role="group" aria-label="City time">
-      {TIME_OPTIONS.map((option) => (
+      {lightOptions.map((option) => (
         <button key={option.id} id={`light-${option.id}`} aria-pressed={timeOfDay === option.id} onClick={() => setTimeOfDay(option.id)}>
           {option.label}
         </button>
@@ -53,7 +60,7 @@ export function App() {
         <AvatarScreen country={country} avatarId={avatarId} onPick={setAvatarId} onBack={() => setStage('globe')} onFly={() => setStage('city')} />
       )}
       {stage === 'city' && country && (
-        <CityScreen country={country} avatar={avatar} timeOfDay={timeOfDay} onChangeFlyer={() => setStage('avatar')} onGlobe={() => setStage('globe')} onMode={setCityMode} />
+        <CityScreen country={country} avatar={avatar} timeOfDay={timeOfDay} onChangeFlyer={() => setStage('avatar')} onGlobe={() => setStage('globe')} onMode={setCityMode} onWorld={setWorld} />
       )}
     </Shell>
   );

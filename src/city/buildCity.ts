@@ -657,7 +657,7 @@ export function buildCity(): City {
 
   const DUSK = { sun: new THREE.Vector3(...SUN_DUSK), sunCol: new THREE.Color(1, 0.56, 0.3), sunI: 2.0, sky: new THREE.Color(0.36, 0.46, 0.85), gnd: new THREE.Color(0.12, 0.09, 0.07), skyI: 1.1, fog: new THREE.Color(0.3, 0.24, 0.34) };
   const DAY = { sun: new THREE.Vector3(...SUN_DAY), sunCol: new THREE.Color(1, 0.95, 0.86), sunI: 3.2, sky: new THREE.Color(0.5, 0.62, 0.9), gnd: new THREE.Color(0.34, 0.31, 0.27), skyI: 1.25, fog: new THREE.Color(0.5, 0.62, 0.8) };
-  const NIGHT = { sunCol: new THREE.Color(0.2, 0.28, 0.5), sunI: 0, sky: new THREE.Color(0.08, 0.13, 0.3), gnd: new THREE.Color(0.008, 0.012, 0.025), skyI: 0.32, fog: new THREE.Color(0.018, 0.026, 0.055) };
+  const NIGHT = { sunCol: new THREE.Color(0.42, 0.55, 0.95), sunI: 1.25, sky: new THREE.Color(0.2, 0.3, 0.62), gnd: new THREE.Color(0.08, 0.12, 0.22), skyI: 1.1, fog: new THREE.Color(0.045, 0.065, 0.13) };
   let dayMix = 1, nightMix = 0, targetDay = 1, targetNight = 0, last = 0;
   const apply = () => {
     const day = dayMix * dayMix * (3 - 2 * dayMix);

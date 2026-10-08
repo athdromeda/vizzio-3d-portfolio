@@ -13,10 +13,18 @@ import type { City } from './buildCity';
 import { ION_ASSET, ORIGIN } from './geo';
 import { ColliderIndex, SUN_DAY } from './layout';
 import { SHARED, makeSkyMaterial } from './shaders';
+import { TileBrightness } from './tileBrightness';
+import type { TimeOfDay } from './timeOfDay';
 import { TileCreasedNormalsPlugin } from './tiles/TileCreasedNormalsPlugin';
 
 /** Draco decoder for the tiles' meshes. Google hosts it; to self-host, copy three/examples/jsm/libs/draco/gltf into public/draco and point here. */
 const DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
+
+/**
+ * Albedo multiplier for the streamed tiles: the real city's atmosphere no longer darkens them
+ * post-process after sunset (see AtmosphereSky), so the tiles are dimmed here instead.
+ */
+const TILE_BRIGHTNESS: Record<TimeOfDay, number> = { day: 1, dusk: 0.02, night: 0.03 };
 
 export function buildRealCity(): City {
   const group = new THREE.Group();
@@ -44,6 +52,14 @@ export function buildRealCity(): City {
   frame.add(tiles.group);
   group.add(frame);
 
+  // every streamed tile is tinted by the time of day as it arrives, and restored when it is dropped
+  const tileBrightness = new TileBrightness();
+  tiles.addEventListener('load-model', ({ scene }) => tileBrightness.add(scene));
+  tiles.addEventListener('dispose-model', ({ scene }) => tileBrightness.remove(scene));
+  let brightness = TILE_BRIGHTNESS.day;
+  let targetBrightness = brightness;
+  let lastTime = 0;
+
   // reflection bake for the flyer: a sky-only scene, lit by nothing but its own material
   const envScene = new THREE.Scene();
   envScene.add(new THREE.Mesh(new THREE.SphereGeometry(100, 32, 16), makeSkyMaterial()));
@@ -53,6 +69,12 @@ export function buildRealCity(): City {
   const ray = new THREE.Raycaster();
   (ray as THREE.Raycaster & { firstHitOnly?: boolean }).firstHitOnly = true; // honoured by the tiles' own raycast
   const from = new THREE.Vector3(), down = new THREE.Vector3(0, -1, 0);
+  const surfaceBelow = (x: number, y: number, z: number) => {
+    ray.set(from.set(x, y + 400, z), down);
+    ray.far = 3000;
+    const hit = ray.intersectObject(tiles.group, true)[0];
+    return hit ? hit.point.y : null;
+  };
   let attached: THREE.Camera | null = null;
 
   return {
@@ -61,7 +83,13 @@ export function buildRealCity(): City {
     envScene,
     fog,
     lightVersion: 0,
-    setTimeOfDay() {},
+    setTimeOfDay(timeOfDay, instant) {
+      targetBrightness = TILE_BRIGHTNESS[timeOfDay];
+      if (instant) {
+        brightness = targetBrightness;
+        tileBrightness.setBrightness(brightness);
+      }
+    },
     attach(camera, renderer) {
       if (attached) tiles.deleteCamera(attached);
       attached = camera;
@@ -72,12 +100,7 @@ export function buildRealCity(): City {
       tiles.setCamera(camera);
       tiles.setResolution(camera, size, size);
     },
-    surfaceBelow(x, y, z) {
-      ray.set(from.set(x, y + 400, z), down);
-      ray.far = 3000;
-      const hit = ray.intersectObject(tiles.group, true)[0];
-      return hit ? hit.point.y : null;
-    },
+    surfaceBelow,
     credits() {
       return tiles
         .getAttributions()
@@ -87,12 +110,21 @@ export function buildRealCity(): City {
     },
     update(t, _camera) {
       SHARED.uTime.value = t;
+      if (brightness !== targetBrightness) {
+        // match the atmosphere's two-second time-of-day change
+        const dt = Math.min(Math.max(t - lastTime, 0), 0.25);
+        const step = dt / 2;
+        brightness = targetBrightness > brightness ? Math.min(targetBrightness, brightness + step) : Math.max(targetBrightness, brightness - step);
+        tileBrightness.setBrightness(brightness);
+      }
+      lastTime = t;
       if (attached) {
         attached.updateMatrixWorld();
         tiles.update();
       }
     },
     dispose() {
+      tileBrightness.clear();
       tiles.dispose();
     },
   };
