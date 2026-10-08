@@ -7,10 +7,11 @@ import { buildCity, type City } from '../city/buildCity';
 import { Ground } from '../city/ground';
 import { GROUND_Y, REAL, getWorld, place, setWorld as setGeoWorld, unplace, type World } from '../city/geo';
 import { FLIGHT_KEYS, Flight } from '../city/flight';
-import { START, getBuildings, landSdf, type Collider } from '../city/layout';
+import { START, getBuildings, landSdf, nearestLand, type Collider } from '../city/layout';
 import { MINIMAP_RANGE, MINIMAP_WATER_HEX, drawMinimap, makeMinimapBase, drawMinimapTile } from '../city/minimap';
 import { makeMinimap3D } from '../city/minimap3d';
 import { buildAssetScene, buildOverlays, cameraWall } from '../city/overlays';
+import { TIME_OF_DAY, type TimeOfDay } from '../city/timeOfDay';
 import { Console } from '../console/Console';
 import { NO_OVERLAY, type Anchor, type InspectCam, type SceneOverlay, type SnapJob } from '../console/engine';
 import { Effects } from '../components/Effects';
@@ -80,7 +81,7 @@ export interface Travel {
 /** Hip height of the pilot model above its soles, metres. */
 const HIP = 1.03;
 /** Parked bikes are drawn, and landing is offered, below this height. */
-const LOW = 220;
+const LOW = 40;
 /** Flyer frame per world: the real tiles are far wider than the stand-in, and their surface is streamed. */
 const REAL_FRAME = { centre: new THREE.Vector2(7000, -4000), radius: 16000 };
 const SIMPLE_FRAME = { centre: new THREE.Vector2(1500, -400), radius: 6500 };
@@ -105,7 +106,7 @@ interface SceneProps {
   onTakeoff: () => void;
   /** True while the landing confirm is up: flight input rests. */
   paused: boolean;
-  day: boolean;
+  timeOfDay: TimeOfDay;
   /** City tour camera. While it is set the flyer is hidden and the arrival waits. */
   tour: React.RefObject<InspectCam | null>;
   anchors: React.RefObject<Map<string, Anchor>>;
@@ -119,11 +120,11 @@ interface SceneProps {
   onReady: () => void;
   /** Called when the landmark in range changes. */
   onNear: (id: string | null) => void;
-  /** The light has settled after a change between day and dusk. */
+  /** The light has settled after a time-of-day change. */
   onLight: () => void;
 }
 
-function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, day, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
+function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, timeOfDay, hud, live, cam, tour, anchors, overlay, jobs, visited, flightRef, travelRef, onTravel, onReady, onNear, onLight }: SceneProps) {
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
@@ -183,13 +184,21 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
       // AtmosphereSky pushes the exposure up for the real sky; the stand-in bloom path wants the default
       gl.toneMappingExposure = 1;
       const at = unplace([flight.pos.x, flight.pos.y, flight.pos.z]);
-      const off = Math.hypot(at[0] - SIMPLE_FRAME.centre.x, at[2] - SIMPLE_FRAME.centre.y);
-      if (landSdf(at[0], at[2]) > 2 || off > SIMPLE_FRAME.radius) {
-        // landed over water or off the generated map: drop him at the start instead
-        at[0] = START.pos[0];
-        at[1] = 0;
-        at[2] = START.pos[2];
+      let tx = at[0], tz = at[2];
+      const off = Math.hypot(tx - SIMPLE_FRAME.centre.x, tz - SIMPLE_FRAME.centre.y);
+      if (off > SIMPLE_FRAME.radius) {
+        // beyond the generated map: pull the point back to its edge before looking for land
+        const k = (SIMPLE_FRAME.radius * 0.95) / off;
+        tx = SIMPLE_FRAME.centre.x + (tx - SIMPLE_FRAME.centre.x) * k;
+        tz = SIMPLE_FRAME.centre.y + (tz - SIMPLE_FRAME.centre.y) * k;
       }
+      if (off > SIMPLE_FRAME.radius || landSdf(tx, tz) <= 2) {
+        // landed over water or off the generated map: put him on the nearest land instead
+        [tx, tz] = nearestLand(tx, tz);
+        at[1] = 0;
+      }
+      at[0] = tx;
+      at[2] = tz;
       ground.arrive(new THREE.Vector3(at[0], Math.max(0, at[1]), at[2]), flight.aimYaw);
       tr.mode = 'walk';
     } else {
@@ -404,9 +413,9 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
   }, [world]);
   const firstLight = useRef(true);
   useEffect(() => {
-    city.setDay(day, firstLight.current);
+    city.setTimeOfDay(timeOfDay, firstLight.current);
     firstLight.current = false;
-  }, [city, day]);
+  }, [city, timeOfDay]);
 
   useEffect(() => {
     let alive = true;
@@ -861,11 +870,10 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     <>
       {/* real mode: atmosphere sky + its own composer. stand-in: the bloom pass below. */}
       {world === 'real' ? (
-        <AtmosphereSky />
+        <AtmosphereSky timeOfDay={timeOfDay} onTimeSettled={onLight} />
       ) : (
-        /* dusk: facades and ground stay under 1; lit windows, lamps and the sun cross it and glow.
-           By day only the sun and its glints on glass and water do. */
-        <Effects threshold={day ? 1.6 : 1.15} strength={day ? 0.12 : 0.26} radius={0.45} />
+        /* At dusk and night, lit windows and lamps cross the bloom threshold. */
+        <Effects threshold={TIME_OF_DAY[timeOfDay].bloom.threshold} strength={TIME_OF_DAY[timeOfDay].bloom.strength} radius={0.45} transition={2} />
       )}
       <primitive object={city.group} />
       <primitive object={rig.yaw} />
@@ -884,12 +892,13 @@ const MARKS = Array.from({ length: 49 }, (_, i) => {
 });
 
 type Control = { keys: string[]; label: string };
+const LANDMARK_CONTROL: Control = { keys: ['E'], label: 'Open a landmark' };
 const COMMON: Control[] = [
-  { keys: ['E'], label: 'Open a landmark' },
   { keys: ['M'], label: 'Open the city map' },
 ];
-/** The key list follows what the visitor is doing: flying, on foot, or on a motorbike. */
-const controlsFor = (mode: TravelMode, canGround: boolean): Control[] =>
+/** The key list follows what the visitor is doing: flying, on foot, or on a motorbike. Landing is only
+ *  offered (and so only listed) low over land; on foot or riding, taking off is always available. */
+const controlsFor = (mode: TravelMode, canGround: boolean, canLand: boolean, canOpenLandmark: boolean): Control[] =>
   mode === 'walk'
     ? [
         { keys: ['W', 'A', 'S', 'D'], label: 'Walk, sidestep' },
@@ -898,6 +907,7 @@ const controlsFor = (mode: TravelMode, canGround: boolean): Control[] =>
         { keys: ['Space'], label: 'Jump' },
         { keys: ['F'], label: 'Ride a motorbike' },
         { keys: ['G'], label: 'Take off' },
+        ...(canOpenLandmark ? [LANDMARK_CONTROL] : []),
         ...COMMON,
       ]
     : mode === 'ride'
@@ -908,6 +918,7 @@ const controlsFor = (mode: TravelMode, canGround: boolean): Control[] =>
           { keys: ['H'], label: 'Horn' },
           { keys: ['F'], label: 'Get off' },
           { keys: ['G'], label: 'Take off' },
+          ...(canOpenLandmark ? [LANDMARK_CONTROL] : []),
           ...COMMON,
         ]
       : [
@@ -916,7 +927,12 @@ const controlsFor = (mode: TravelMode, canGround: boolean): Control[] =>
           { keys: ['Shift'], label: 'Boost' },
           { keys: ['Space'], label: 'Ascend' },
           { keys: ['C'], label: 'Descend' },
-          canGround ? { keys: ['G'], label: 'Land on the street' } : { keys: ['Esc'], label: 'Free the cursor' },
+          ...(canGround
+            ? canLand
+              ? [{ keys: ['G'], label: 'Land on the street' }]
+              : []
+            : [{ keys: ['Esc'], label: 'Free the cursor' }]),
+          ...(canOpenLandmark ? [LANDMARK_CONTROL] : []),
           ...COMMON,
         ];
 
@@ -953,19 +969,17 @@ const Diamond = () => (
 interface Props {
   country: Country;
   avatar: Avatar;
-  /** Day or dusk light over the city. */
-  day: boolean;
+  /** Day, dusk or night light over the city. */
+  timeOfDay: TimeOfDay;
   onChangeFlyer: () => void;
   onGlobe: () => void;
   /** Tells the shell what the visitor is doing, so the control hint can follow. */
   onMode: (mode: CityMode) => void;
-  /** Tells the shell which world is active, so the day/dusk switch can follow it. */
-  onWorld: (world: World) => void;
 }
 
 export type CityMode = 'fly' | 'tour' | 'console' | 'map';
 
-export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMode, onWorld }: Props) {
+export function CityScreen({ country, avatar, timeOfDay, onChangeFlyer, onGlobe, onMode }: Props) {
   // Both cities are built once and kept alive, so a swap never re-streams the tiles. The generated
   // city is built eagerly without a token, and lazily on the first landing otherwise (see later tasks).
   const [realCity, setRealCity] = useState<City | null>(null);
@@ -1061,9 +1075,6 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
     onMode(mode);
     return () => onMode('fly');
   }, [mode, onMode]);
-  useEffect(() => {
-    onWorld(world);
-  }, [world, onWorld]);
   const near = LANDMARKS.find((l) => l.id === nearId) ?? null;
   const cam = useRef<InspectCam | null>(null);
   const anchors = useRef(new Map<string, Anchor>());
@@ -1169,14 +1180,14 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
     }
   };
   // the stills show the city's light: when it changes, drop them and render the open landmark's again
-  const lightSeen = useRef(day);
+  const lightSeen = useRef(timeOfDay);
   useEffect(() => {
-    if (lightSeen.current === day) return;
-    lightSeen.current = day;
+    if (lightSeen.current === timeOfDay) return;
+    lightSeen.current = timeOfDay;
     jobs.current.length = 0;
     asked.current = new Set(asked.current.has('asset') ? ['asset'] : []);
     setShots({});
-  }, [day]);
+  }, [timeOfDay]);
   /** Once the new light has settled, render the open landmark's stills again. */
   const onLight = () => {
     if (state.current.openId) queueStills(state.current.openId);
@@ -1317,7 +1328,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
           gl={{ antialias: false, alpha: false, powerPreference: 'high-performance', depth: !REAL }}
           camera={{ fov: 58, near: 1, far: 42000, position: INTRO_CAM.toArray() }}
         >
-          {city && <CityScene city={city} world={world} minimap3D={minimap3D} onLand={land} onTakeoff={takeoff} paused={confirmLand} avatar={avatar} day={day} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
+          {city && <CityScene city={city} world={world} minimap3D={minimap3D} onLand={land} onTakeoff={takeoff} paused={confirmLand} avatar={avatar} timeOfDay={timeOfDay} hud={hud} live={live} cam={cam} tour={tourCam} anchors={anchors} overlay={overlay} jobs={jobs} visited={visited} flightRef={flightRef} travelRef={travelRef} onTravel={setTravel} onReady={() => setReady(true)} onNear={setNearId} onLight={onLight} />}
         </Canvas>
       </div>
 
@@ -1386,7 +1397,7 @@ export function CityScreen({ country, avatar, day, onChangeFlyer, onGlobe, onMod
         </div>
 
         <ul className="hud-panel hud-keys" aria-label="Controls">
-          {controlsFor(travel.mode, canGround).map((c) => (
+          {controlsFor(travel.mode, canGround, travel.canLand, near !== null).map((c) => (
             <li key={c.label}>
               <span className="keys">
                 {c.keys.map((k) => (

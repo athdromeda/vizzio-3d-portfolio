@@ -117,7 +117,7 @@ ul {
   text-transform: uppercase;
 }
 
-/* two-way switch in the top bar */
+/* segmented control in the top bar */
 .seg {
   display: flex;
   border: 1px solid var(--line-strong);

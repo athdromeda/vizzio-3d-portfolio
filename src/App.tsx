@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { REAL, type World } from './city/geo';
+import { TIME_OPTIONS, type TimeOfDay } from './city/timeOfDay';
 import { Shell } from './components/Shell';
 import { AVATARS } from './data/avatars';
 import type { Country } from './data/countries';
@@ -27,21 +27,19 @@ export function App() {
   const [avatarId, setAvatarId] = useState(AVATARS[0].id);
   const avatar = AVATARS.find((a) => a.id === avatarId) ?? AVATARS[0];
   const [cityMode, setCityMode] = useState<CityMode>('fly');
-  const [cityWorld, setCityWorld] = useState<World>('simple');
-  const [day, setDay] = useState(false); // opens at dusk; the switch in the top bar changes it
+  const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>('day');
   const light = (
-    <div className="seg" role="group" aria-label="City light">
-      <button id="light-day" aria-pressed={day} onClick={() => setDay(true)}>
-        Day
-      </button>
-      <button id="light-dusk" aria-pressed={!day} onClick={() => setDay(false)}>
-        Dusk
-      </button>
+    <div className="seg" role="group" aria-label="City time">
+      {TIME_OPTIONS.map((option) => (
+        <button key={option.id} id={`light-${option.id}`} aria-pressed={timeOfDay === option.id} onClick={() => setTimeOfDay(option.id)}>
+          {option.label}
+        </button>
+      ))}
     </div>
   );
 
   return (
-    <Shell hint={(stage === 'city' && CITY_HINTS[cityMode]) || HINTS[stage]} tools={stage === 'city' && (!REAL || cityWorld === 'simple') ? light : undefined}>
+    <Shell hint={(stage === 'city' && CITY_HINTS[cityMode]) || HINTS[stage]} tools={stage === 'city' && cityMode === 'fly' ? light : undefined}>
       {stage === 'globe' && (
         <GlobeScreen
           initialFocusId={country?.id}
@@ -55,7 +53,7 @@ export function App() {
         <AvatarScreen country={country} avatarId={avatarId} onPick={setAvatarId} onBack={() => setStage('globe')} onFly={() => setStage('city')} />
       )}
       {stage === 'city' && country && (
-        <CityScreen country={country} avatar={avatar} day={day} onChangeFlyer={() => setStage('avatar')} onGlobe={() => setStage('globe')} onMode={setCityMode} onWorld={setCityWorld} />
+        <CityScreen country={country} avatar={avatar} timeOfDay={timeOfDay} onChangeFlyer={() => setStage('avatar')} onGlobe={() => setStage('globe')} onMode={setCityMode} />
       )}
     </Shell>
   );

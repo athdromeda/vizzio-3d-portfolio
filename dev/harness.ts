@@ -8,6 +8,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { buildPlaceholder } from '../src/avatars/builders';
 import { SEAT, buildBike, buildParked, spotsNear } from '../src/city/bike';
 import { buildCity } from '../src/city/buildCity';
+import type { TimeOfDay } from '../src/city/timeOfDay';
 import { KINDS, SIZE, buildVehicle, livery, vehicleMaterial } from '../src/city/vehicles';
 
 const W = window.innerWidth, H = window.innerHeight;
@@ -86,7 +87,7 @@ function lineup(x: number, z: number, seed = 0) {
 declare global {
   interface Window {
     rider: (mode: 'walk' | 'ride' | 'off', x: number, z: number, yaw: number, phase?: number, lean?: number) => number;
-    shot: (pos: number[], look: number[], day: boolean, time?: number) => number;
+    shot: (pos: number[], look: number[], timeOfDay: TimeOfDay, time?: number) => number;
     buildMs: number;
   }
 }
@@ -119,11 +120,11 @@ let actor: { x: number; y: number; z: number; vx: number; vz: number; urge: numb
 (window as unknown as { actorAt: (x?: number, z?: number, vx?: number, vz?: number, urge?: number) => void }).actorAt = (x, z, vx = 0, vz = 0, urge = 0) => {
   actor = x === undefined || z === undefined ? null : { x, y: 0, z, vx, vz, urge };
 };
-window.shot = (pos, look, day, time = 12) => {
-  city.setDay(day, true);
+window.shot = (pos, look, timeOfDay, time = 12) => {
+  city.setTimeOfDay(timeOfDay, true);
   bakeEnv();
-  bloom.strength = day ? 0.12 : 0.26;
-  bloom.threshold = day ? 1.6 : 1.15;
+  bloom.strength = timeOfDay === 'day' ? 0.12 : timeOfDay === 'night' ? 0.32 : 0.26;
+  bloom.threshold = timeOfDay === 'day' ? 1.6 : timeOfDay === 'night' ? 1.05 : 1.15;
   camera.position.set(pos[0], pos[1], pos[2]);
   camera.lookAt(look[0], look[1], look[2]);
   camera.updateMatrixWorld();

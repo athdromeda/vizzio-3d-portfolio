@@ -146,11 +146,11 @@ Cheapest cuts first, each in one place:
 
 With `VITE_CESIUM_ION_TOKEN` set, `city/realCity.ts` streams Google Photorealistic 3D Tiles (Cesium ion
 asset `2275207`) in place of the generated city, and `components/AtmosphereSky.tsx` draws the sky and sun
-from the takram atmosphere at a fixed midday. It type-checks and was booted once offline to confirm the
+from the takram atmosphere at the selected Day (09:00), Dusk (18:00) or Night (21:00) time. It type-checks and was booted once offline to confirm the
 wiring does not crash. It has never received a tile. On the first run with a token:
 
 1. Check the data attribution line appears at the bottom. Google's terms require it to stay visible.
-2. Check the sky and sun: midday in Singapore should put the sun high and roughly to the south. If the
+2. Check the sky and sun in all three modes: 09:00 in Singapore should put the sun high. If the
    sun is rotated relative to the city, add an `azimuth` to the `ReorientationPlugin` in `city/realCity.ts`
    (or correct the `worldToECEFMatrix` basis in `components/AtmosphereSky.tsx`) until it matches. If the
    frame is too dark or too bright, adjust `EXPOSURE` in the same file.
@@ -159,7 +159,8 @@ wiring does not crash. It has never received a tile. On the first run with a tok
 5. In `city/geo.ts`, correct each latitude/longitude in `ANCHORS`. They were typed from memory.
 6. Console tags, patrol routes, the airport fence and all city-map markers are placed for the generated
    city and merely shifted with their nearest landmark. They will need real coordinates.
-7. The Day / Dusk switch is hidden in this mode: the tiles carry their own baked daylight.
+7. Check the Day / Dusk / Night transition. The atmosphere follows the chosen hour, but the tiles carry
+   baked daylight imagery and cannot provide authentic illuminated windows at night.
 8. Watch the Cesium ion billing page during the first session.
 
 The realism pass adds three things, all in this mode only:

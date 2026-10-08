@@ -4,6 +4,7 @@ import { PALETTE } from '../styles/palette';
 import { ColliderIndex, FOG_DENSITY, KIND, SUN_DAY, SUN_DUSK, bakeGround, bakeHeights, bakeShadow, getBuildings, getShips, getTrees, toCollider, type Collider, type HeightExtra } from './layout';
 import { SHARED, makeBuildingMaterial, makeGroundMaterial, makeSkyMaterial, makeTreeMaterial } from './shaders';
 import { buildStreetLife, type Actor, type Obstacle } from './street';
+import { TIME_OF_DAY, type TimeOfDay } from './timeOfDay';
 
 const WARM = 0xffb070;
 
@@ -34,10 +35,8 @@ export interface City {
   fog: THREE.FogExp2;
   /** Goes up each time the light has settled after a change, so reflections can be re-baked. */
   lightVersion: number;
-  /** Whether the day/dusk switch does anything. False for the real tiles, which carry their own daylight. */
-  lit: boolean;
-  /** Switch between day and dusk. The change eases over a second or two unless `instant`. */
-  setDay(day: boolean, instant?: boolean): void;
+  /** Switch among day, dusk and night. The change eases over two seconds unless `instant`. */
+  setTimeOfDay(timeOfDay: TimeOfDay, instant?: boolean): void;
   /** Real tiles only: the camera whose view decides which tiles to load. */
   attach?(camera: THREE.Camera, renderer: THREE.WebGLRenderer): void;
   /** Real tiles only: a second camera (the minimap's top-down view) that tile detail should also follow. */
@@ -658,19 +657,22 @@ export function buildCity(): City {
 
   const DUSK = { sun: new THREE.Vector3(...SUN_DUSK), sunCol: new THREE.Color(1, 0.56, 0.3), sunI: 2.0, sky: new THREE.Color(0.36, 0.46, 0.85), gnd: new THREE.Color(0.12, 0.09, 0.07), skyI: 1.1, fog: new THREE.Color(0.3, 0.24, 0.34) };
   const DAY = { sun: new THREE.Vector3(...SUN_DAY), sunCol: new THREE.Color(1, 0.95, 0.86), sunI: 3.2, sky: new THREE.Color(0.5, 0.62, 0.9), gnd: new THREE.Color(0.34, 0.31, 0.27), skyI: 1.25, fog: new THREE.Color(0.5, 0.62, 0.8) };
-  let day = 1, target = 1, last = 0;
+  const NIGHT = { sunCol: new THREE.Color(0.2, 0.28, 0.5), sunI: 0, sky: new THREE.Color(0.08, 0.13, 0.3), gnd: new THREE.Color(0.008, 0.012, 0.025), skyI: 0.32, fog: new THREE.Color(0.018, 0.026, 0.055) };
+  let dayMix = 1, nightMix = 0, targetDay = 1, targetNight = 0, last = 0;
   const apply = () => {
-    const k = day * day * (3 - 2 * day);
-    SHARED.uDay.value = k;
-    SHARED.uSun.value.copy(DUSK.sun).lerp(DAY.sun, k).normalize();
+    const day = dayMix * dayMix * (3 - 2 * dayMix);
+    const night = nightMix * nightMix * (3 - 2 * nightMix);
+    SHARED.uDay.value = day;
+    SHARED.uNight.value = night;
+    SHARED.uSun.value.copy(DUSK.sun).lerp(DAY.sun, day).normalize();
     sunLight.position.copy(SHARED.uSun.value).multiplyScalar(1000);
-    sunLight.color.copy(DUSK.sunCol).lerp(DAY.sunCol, k);
-    sunLight.intensity = DUSK.sunI + (DAY.sunI - DUSK.sunI) * k;
-    skyLight.color.copy(DUSK.sky).lerp(DAY.sky, k);
-    skyLight.groundColor.copy(DUSK.gnd).lerp(DAY.gnd, k);
-    skyLight.intensity = DUSK.skyI + (DAY.skyI - DUSK.skyI) * k;
-    fog.color.copy(DUSK.fog).lerp(DAY.fog, k);
-    for (const g of glows) g.mat.color.copy(g.dusk).lerp(g.day, k);
+    sunLight.color.copy(DUSK.sunCol).lerp(DAY.sunCol, day).lerp(NIGHT.sunCol, night);
+    sunLight.intensity = THREE.MathUtils.lerp(THREE.MathUtils.lerp(DUSK.sunI, DAY.sunI, day), NIGHT.sunI, night);
+    skyLight.color.copy(DUSK.sky).lerp(DAY.sky, day).lerp(NIGHT.sky, night);
+    skyLight.groundColor.copy(DUSK.gnd).lerp(DAY.gnd, day).lerp(NIGHT.gnd, night);
+    skyLight.intensity = THREE.MathUtils.lerp(THREE.MathUtils.lerp(DUSK.skyI, DAY.skyI, day), NIGHT.skyI, night);
+    fog.color.copy(DUSK.fog).lerp(DAY.fog, day).lerp(NIGHT.fog, night);
+    for (const g of glows) g.mat.color.copy(g.dusk).lerp(g.day, day);
   };
   apply();
 
@@ -681,11 +683,12 @@ export function buildCity(): City {
     envScene,
     fog,
     lightVersion: 0,
-    lit: true,
-    setDay(on, instant) {
-      target = on ? 1 : 0;
-      if (instant && day !== target) {
-        day = target;
+    setTimeOfDay(timeOfDay, instant) {
+      targetDay = TIME_OF_DAY[timeOfDay].day;
+      targetNight = TIME_OF_DAY[timeOfDay].night;
+      if (instant && (dayMix !== targetDay || nightMix !== targetNight)) {
+        dayMix = targetDay;
+        nightMix = targetNight;
         apply();
         city.lightVersion++;
       }
@@ -694,10 +697,12 @@ export function buildCity(): City {
       const dt = Math.min(Math.max(t - last, 0), 0.25); // a generous cap: the light change should take seconds, not frames
       last = t;
       SHARED.uTime.value = t;
-      if (day !== target) {
-        day = target > day ? Math.min(target, day + dt / 1.8) : Math.max(target, day - dt / 1.8);
+      if (dayMix !== targetDay || nightMix !== targetNight) {
+        const step = dt / 2;
+        dayMix = targetDay > dayMix ? Math.min(targetDay, dayMix + step) : Math.max(targetDay, dayMix - step);
+        nightMix = targetNight > nightMix ? Math.min(targetNight, nightMix + step) : Math.max(targetNight, nightMix - step);
         apply();
-        if (day === target) city.lightVersion++;
+        if (dayMix === targetDay && nightMix === targetNight) city.lightVersion++;
       }
       sky.position.copy(camera);
       street.update(camera, t, actor, main);

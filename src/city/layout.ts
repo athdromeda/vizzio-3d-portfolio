@@ -102,6 +102,24 @@ export function landSdf(x0: number, z0: number) {
   return d;
 }
 
+/**
+ * The nearest point on land to (x, z): (x, z) itself when it is already on land, otherwise the first
+ * point with a little land to spare that a ring search outward finds. Returns (x, z) unchanged when
+ * nothing is found within `maxR`. Used when a real-tiles landing has no dry spot in the generated city.
+ */
+export function nearestLand(x: number, z: number, maxR = 2500): [number, number] {
+  if (landSdf(x, z) > 2) return [x, z];
+  for (let r = 25; r <= maxR; r += 25) {
+    const steps = Math.max(8, Math.round((2 * Math.PI * r) / 40));
+    for (let i = 0; i < steps; i++) {
+      const t = (i / steps) * Math.PI * 2;
+      const px = x + Math.cos(t) * r, pz = z + Math.sin(t) * r;
+      if (landSdf(px, pz) > 8) return [px, pz];
+    }
+  }
+  return [x, z];
+}
+
 export function parkSdf(x: number, z: number) {
   let d = Infinity;
   for (const p of PARKS) d = Math.min(d, sdEll(x, z, p));

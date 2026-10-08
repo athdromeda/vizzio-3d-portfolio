@@ -13,13 +13,13 @@ import { ToneMappingMode } from 'postprocessing';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { ORIGIN } from '../city/geo';
+import { TIME_OF_DAY, type TimeOfDay } from '../city/timeOfDay';
 
 /** Matches the three-geospatial reference story: day 173 (22 June), 10:00 local at 103.8545 E. */
 const YEAR = 2025;
 const DAY_OF_YEAR = 173;
-const TIME_OF_DAY = 9;
 const EXPOSURE = 6;
-const SUN_DATE = new Date(Date.UTC(YEAR, 0, 1) + (DAY_OF_YEAR * 24 + TIME_OF_DAY - ORIGIN.lon / 15) * 3600000);
+const dateAt = (hour: number) => new Date(Date.UTC(YEAR, 0, 1) + (DAY_OF_YEAR * 24 + hour - ORIGIN.lon / 15) * 3600000);
 
 /** Self-hosted spatiotemporal blue noise (public/clouds/stbn.bin): the one cloud texture with no code generator. */
 const STBN_URL = `${import.meta.env.BASE_URL}clouds/stbn.bin`;
@@ -30,7 +30,12 @@ const up = new THREE.Vector3();
 const ecef = new THREE.Vector3();
 const south = new THREE.Vector3();
 
-export function AtmosphereSky() {
+interface Props {
+  timeOfDay: TimeOfDay;
+  onTimeSettled?: () => void;
+}
+
+export function AtmosphereSky({ timeOfDay, onTimeSettled }: Props) {
   const api = useRef<AtmosphereApi>(null);
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
@@ -38,6 +43,8 @@ export function AtmosphereSky() {
   // Sky-EnvironmentMap reference). Without it the flyer reflects the stand-in sky.
   const [env, setEnv] = useState<RenderCubeTextureApi | null>(null);
   const envPos = useRef<THREE.Group>(null);
+  const hour = useRef(TIME_OF_DAY[timeOfDay].hour);
+  const transition = useRef({ from: hour.current, to: hour.current, elapsed: 2, moving: false });
   // Cloud shape/weather/turbulence are generated in code (no downloaded textures); the effect
   // renders each once on first use.
   const cloudTextures = useMemo(
@@ -68,9 +75,15 @@ export function AtmosphereSky() {
     Ellipsoid.WGS84.getEastNorthUpVectors(ecef, east, north, up);
     south.copy(north).negate();
     a.worldToECEFMatrix.makeBasis(east, up, south).setPosition(ecef);
-    a.updateByDate(SUN_DATE);
+    a.updateByDate(dateAt(hour.current));
     gl.toneMappingExposure = EXPOSURE;
   }, [gl]);
+
+  useEffect(() => {
+    const to = TIME_OF_DAY[timeOfDay].hour;
+    if (to === hour.current) return;
+    transition.current = { from: hour.current, to, elapsed: 0, moving: true };
+  }, [timeOfDay]);
 
   useEffect(() => {
     scene.environment = env?.fbo.texture ?? null;
@@ -79,8 +92,19 @@ export function AtmosphereSky() {
     };
   }, [scene, env]);
 
-  useFrame(({ camera }) => {
-    api.current?.updateByDate(SUN_DATE);
+  useFrame(({ camera }, dt) => {
+    const change = transition.current;
+    if (change.moving) {
+      change.elapsed = Math.min(2, change.elapsed + dt);
+      const x = change.elapsed / 2;
+      const k = x * x * (3 - 2 * x);
+      hour.current = THREE.MathUtils.lerp(change.from, change.to, k);
+      if (change.elapsed === 2) {
+        change.moving = false;
+        onTimeSettled?.();
+      }
+    }
+    api.current?.updateByDate(dateAt(hour.current));
     envPos.current?.position.copy(camera.position);
   });
 

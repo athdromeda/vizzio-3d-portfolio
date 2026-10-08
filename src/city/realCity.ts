@@ -24,6 +24,7 @@ export function buildRealCity(): City {
   // the same sky as the stand-in city is kept for the flyer's reflection bake only; the visible sky
   // is drawn by the AtmosphereSky component
   SHARED.uDay.value = 1;
+  SHARED.uNight.value = 0;
   SHARED.uSun.value.set(...SUN_DAY);
 
   const tiles = new TilesRenderer();
@@ -60,8 +61,7 @@ export function buildRealCity(): City {
     envScene,
     fog,
     lightVersion: 0,
-    lit: false,
-    setDay() {},
+    setTimeOfDay() {},
     attach(camera, renderer) {
       if (attached) tiles.deleteCamera(attached);
       attached = camera;

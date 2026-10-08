@@ -1,4 +1,4 @@
-// Development only: screenshots of the city from fixed viewpoints, by day and at dusk.
+// Development only: screenshots of the city from fixed viewpoints, by day, at dusk and at night.
 // usage: npx vite build -c vite.harness.config.ts && node scripts/shot-city-views.mjs <outDir> [views] [width] [height] [modes]
 import { chromium } from 'playwright-core';
 import { resolve } from 'node:path';
@@ -25,7 +25,7 @@ const VIEWS = {
   kerb: [[-610, 26, 520], [-760, 0, 330]],
   down: [[-700, 150, 331], [-700, 0, 330]],
 };
-const [out, which = 'all', w = '1100', h = '620', modes = 'day,dusk'] = process.argv.slice(2);
+const [out, which = 'all', w = '1100', h = '620', modes = 'day,dusk,night'] = process.argv.slice(2);
 const names = which === 'all' ? Object.keys(VIEWS) : which.split(',');
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -87,7 +87,7 @@ const times = {};
 for (const mode of modes.split(',')) {
   for (const n of names) {
     const [pos, look] = VIEWS[n];
-    times[`${n}-${mode}`] = await page.evaluate(([p, l, d, t]) => window.shot(p, l, d, t), [pos, look, mode === 'day', CLOCK]);
+    times[`${n}-${mode}`] = await page.evaluate(([p, l, m, t]) => window.shot(p, l, m, t), [pos, look, mode, CLOCK]);
     await page.screenshot({ path: `${out}/v-${n}-${mode}.png` });
   }
 }

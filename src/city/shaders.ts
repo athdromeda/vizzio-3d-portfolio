@@ -1,5 +1,5 @@
 // Shaders for the stand-in city: sky, water + land in one ground pass, buildings, roofs and trees.
-// Every material shares one set of uniforms (sun, day/dusk blend, time, baked maps), so the whole city
+// Every material shares one set of uniforms (sun, time-of-day blend, time, baked maps), so the whole city
 // changes light together. All output linear HDR; tone mapping and bloom happen in <Effects>.
 import * as THREE from 'three';
 import { BLOCK, FOG_DENSITY, GLSL_MAP, GLSL_WARP, MAP_BOX, ROAD, SUN_DAY } from './layout';
@@ -8,10 +8,11 @@ import { BUSY, FRONT0, SLOT, STOP_LINE } from './trafficRules';
 /** Half-width of the square around the camera, in street-grid metres, where traffic is 3D (see street.ts). */
 export const POOL = 480;
 
-/** Shared by every city material. `uDay` runs from 0 (dusk) to 1 (day). */
+/** Shared by every city material. Dusk is the base look; `uDay` and `uNight` blend away from it. */
 export const SHARED = {
   uSun: { value: new THREE.Vector3(...SUN_DAY) },
   uDay: { value: 1 },
+  uNight: { value: 0 },
   uTime: { value: 0 },
   uHeight: { value: null as THREE.Texture | null },
   /** The same heights at an eighth of the resolution, each texel the tallest thing in its patch. For long rays. */
@@ -49,6 +50,7 @@ float fbm(vec2 p) {
 export const WORLD = /* glsl */ `
 uniform vec3 uSun;
 uniform float uDay;
+uniform float uNight;
 uniform float uTime;
 uniform sampler2D uHeight;
 uniform sampler2D uHeightFar;
@@ -81,16 +83,20 @@ vec3 daySky(vec3 d) {
   c += vec3(1.0, 0.9, 0.72) * (pow(sd, 6.0) * 0.12 + pow(sd, 90.0) * 0.45);
   return c;
 }
-vec3 skyColor(vec3 d) { return mix(duskSky(d), daySky(d), uDay); }
+vec3 nightSky(vec3 d) {
+  float y = max(d.y, 0.0);
+  return mix(vec3(0.018, 0.026, 0.055), vec3(0.004, 0.012, 0.035), smoothstep(0.0, 0.65, y));
+}
+vec3 skyColor(vec3 d) { return mix(mix(duskSky(d), daySky(d), uDay), nightSky(d), uNight); }
 vec3 hazeColor(vec3 viewDir) { return skyColor(normalize(vec3(viewDir.x, 0.03, viewDir.z))); }
-float fogAmount(float dist) { float f = dist * ${FOG_DENSITY} * mix(0.68, 0.42, uDay); return 1.0 - exp(-f * f); }
+float fogAmount(float dist) { float f = dist * ${FOG_DENSITY} * mix(mix(0.68, 0.42, uDay), 0.56, uNight); return 1.0 - exp(-f * f); }
 
-vec3 sunRadiance() { return mix(vec3(1.0, 0.55, 0.27) * 1.35, vec3(1.0, 0.93, 0.82) * 1.55, uDay); }
+vec3 sunRadiance() { return mix(vec3(1.0, 0.55, 0.27) * 1.35, vec3(1.0, 0.93, 0.82) * 1.55, uDay) * (1.0 - uNight); }
 /** Light from the sky above and the ground below. */
 vec3 ambient(vec3 n) {
   vec3 up = mix(vec3(0.36, 0.42, 0.64) * 0.5, vec3(0.3, 0.42, 0.7) * 0.5, uDay);
   vec3 down = mix(vec3(0.1, 0.085, 0.08), vec3(0.17, 0.16, 0.14), uDay);
-  return mix(down, up, n.y * 0.5 + 0.5);
+  return mix(mix(down, up, n.y * 0.5 + 0.5), mix(vec3(0.008, 0.012, 0.025), vec3(0.035, 0.055, 0.11), n.y * 0.5 + 0.5), uNight);
 }
 
 float heightAt(vec2 p) { return texture2D(uHeight, (p - MAPBOX.xy) * MAPBOX.zw).r * 510.0; }
@@ -136,13 +142,13 @@ export function makeSkyMaterial() {
         vec3 d = normalize(vDir);
         vec3 c = skyColor(d);
         float sd = max(dot(d, uSun), 0.0);
-        c += mix(vec3(6.0, 3.0, 1.2), vec3(22.0, 20.0, 17.0), uDay) * smoothstep(0.99955, 0.9998, sd); // sun disc
+        c += mix(vec3(6.0, 3.0, 1.2), vec3(22.0, 20.0, 17.0), uDay) * smoothstep(0.99955, 0.9998, sd) * (1.0 - uNight); // sun disc
         if (d.y > 0.015) {
           vec2 uv = d.xz / (d.y + 0.14);
           float az = max(dot(normalize(d.xz), normalize(uSun.xz)), 0.0);
           // dusk: high streaks lit from below near the sun
           float streak = fbm(uv * vec2(0.9, 1.7) + vec2(uTime * 0.003, 0.0));
-          streak = smoothstep(0.5, 0.82, streak) * smoothstep(0.015, 0.14, d.y);
+          streak = smoothstep(0.5, 0.82, streak) * smoothstep(0.015, 0.14, d.y) * (1.0 - uNight);
           vec3 streakCol = mix(vec3(0.1, 0.09, 0.17), vec3(1.35, 0.5, 0.26), pow(az, 1.8) * exp(-d.y * 2.6));
           // day: scattered fair-weather cumulus, bright on top, grey-blue beneath
           vec2 cu = uv * 1.5 + vec2(uTime * 0.004, 0.0);
@@ -151,7 +157,7 @@ export function makeSkyMaterial() {
           float thick = smoothstep(0.52, 0.8, puff);
           vec3 puffCol = mix(vec3(1.05, 1.05, 1.04), vec3(0.62, 0.68, 0.8), thick * 0.75);
           puffCol = mix(puffCol, hazeColor(d), exp(-d.y * 9.0) * 0.8);
-          c = mix(mix(c, streakCol, streak * 0.75), mix(c, puffCol, cover * 0.92), uDay);
+          c = mix(mix(c, streakCol, streak * 0.75), mix(c, puffCol, cover * 0.92), uDay * (1.0 - uNight));
         }
         gl_FragColor = vec4(c, 1.0);
       }`,
