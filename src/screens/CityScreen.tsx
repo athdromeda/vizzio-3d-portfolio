@@ -228,6 +228,11 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
     if (minimap3d) city.registerMapCamera?.(minimap3d.camera, MINIMAP3D_SIZE);
   }, [minimap3d, city]);
   const model = useRef<THREE.Object3D | null>(null);
+  const worldRef = useRef(world);
+  useEffect(() => {
+    worldRef.current = world;
+    model.current?.userData.setWorldProfile?.(world === 'real' ? 'real' : 'simple');
+  }, [world]);
   const frames = useRef(0);
   const intro = useRef(0);
   const shown = useRef({ speed: -1, alt: -1, hdg: -1, near: null as string | null, dist: LANDMARKS.map(() => ''), spots: LANDMARKS.map(() => [0, 0]) });
@@ -424,6 +429,7 @@ function CityScene({ city, world, minimap3D, onLand, onTakeoff, paused, avatar, 
       (obj.userData.setPose as ((preview: boolean) => void) | undefined)?.(false);
       rig.lean.add(obj);
       model.current = obj;
+      obj.userData.setWorldProfile?.(worldRef.current === 'real' ? 'real' : 'simple');
     });
     return () => {
       alive = false;

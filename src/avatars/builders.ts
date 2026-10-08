@@ -146,6 +146,19 @@ function makeMats() {
 }
 type Mats = ReturnType<typeof makeMats>;
 
+export type AvatarWorldProfile = 'simple' | 'real';
+
+interface MaterialSnapshot {
+  material: THREE.Material;
+  color?: THREE.Color;
+  roughness?: number;
+  metalness?: number;
+  clearcoat?: number;
+  clearcoatRoughness?: number;
+  envMapIntensity?: number;
+  basic: boolean;
+}
+
 interface Fx {
   spinners: THREE.Object3D[];
   flames: THREE.Object3D[];
@@ -634,7 +647,22 @@ const BUILDERS: Record<AvatarKind, (m: Mats, fx: Fx) => THREE.Group> = { kite, s
 /** Builds a placeholder. Call `object.userData.tick(seconds)` each frame to animate it. */
 export function buildPlaceholder(kind: AvatarKind): THREE.Group {
   const fx: Fx = { spinners: [], flames: [] };
-  const model = BUILDERS[kind](makeMats(), fx);
+  const mats = makeMats();
+  const model = BUILDERS[kind](mats, fx);
+  const snapshots: MaterialSnapshot[] = [...new Set(Object.values(mats))].map((material) => {
+    const physical = material as THREE.MeshPhysicalMaterial;
+    const hasColor = 'color' in material && material.color instanceof THREE.Color;
+    return {
+      material,
+      color: hasColor ? material.color.clone() : undefined,
+      roughness: physical.isMeshPhysicalMaterial ? physical.roughness : undefined,
+      metalness: physical.isMeshPhysicalMaterial ? physical.metalness : undefined,
+      clearcoat: physical.isMeshPhysicalMaterial ? physical.clearcoat : undefined,
+      clearcoatRoughness: physical.isMeshPhysicalMaterial ? physical.clearcoatRoughness : undefined,
+      envMapIntensity: physical.isMeshPhysicalMaterial ? physical.envMapIntensity : undefined,
+      basic: 'isMeshBasicMaterial' in material && material.isMeshBasicMaterial === true,
+    };
+  });
   // the builders leave the model in its showroom pose; flight wants it level
   const pose = model.rotation.clone();
   model.traverse((o) => {
@@ -643,6 +671,30 @@ export function buildPlaceholder(kind: AvatarKind): THREE.Group {
   });
   const root = new THREE.Group();
   root.add(model);
+  root.userData.setWorldProfile = (profile: AvatarWorldProfile) => {
+    for (const snapshot of snapshots) {
+      const material = snapshot.material as THREE.MeshPhysicalMaterial & THREE.MeshBasicMaterial;
+      if (snapshot.color && material.color) {
+        material.color.copy(snapshot.color);
+        if (profile === 'real') {
+          if (snapshot.basic) {
+            material.color.multiplyScalar(0.55);
+          } else {
+            const hsl = { h: 0, s: 0, l: 0 };
+            material.color.getHSL(hsl);
+            material.color.setHSL(hsl.h, hsl.s * 0.65, hsl.l);
+            material.color.multiply(new THREE.Color(0.92, 0.97, 1.06));
+          }
+        }
+      }
+      if (snapshot.roughness !== undefined) material.roughness = profile === 'real' ? Math.min(1, snapshot.roughness * 2.2) : snapshot.roughness;
+      if (snapshot.metalness !== undefined) material.metalness = profile === 'real' ? Math.min(snapshot.metalness, 0.65) : snapshot.metalness;
+      if (snapshot.clearcoat !== undefined) material.clearcoat = profile === 'real' ? snapshot.clearcoat * 0.08 : snapshot.clearcoat;
+      if (snapshot.clearcoatRoughness !== undefined) material.clearcoatRoughness = profile === 'real' ? Math.min(1, snapshot.clearcoatRoughness + 0.12) : snapshot.clearcoatRoughness;
+      if (snapshot.envMapIntensity !== undefined) material.envMapIntensity = profile === 'real' ? snapshot.envMapIntensity * 0.18 : snapshot.envMapIntensity;
+      material.needsUpdate = true;
+    }
+  };
   /** true: showroom pose for previews and thumbnails. false: level, for flight. */
   const joints = model.userData.joints as Parameters<typeof applyStance>[0] | undefined;
   root.userData.setPose = (preview: boolean) => {
